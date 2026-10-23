@@ -1,0 +1,52 @@
+--- a/Engine/Source/Developer/MessageLog/Private/MessageTesting.cpp
++++ b/Engine/Source/Developer/MessageLog/Private/MessageTesting.cpp
+@@ -1,8 +1,11 @@
+ // Copyright Epic Games, Inc. All Rights Reserved.
+ 
+ #include "CoreMinimal.h"
++#include "Containers/Ticker.h"
++#include "Framework/Notifications/NotificationManager.h"
+ #include "HAL/IConsoleManager.h"
+ #include "Logging/MessageLog.h" 
++#include "Widgets/Notifications/SNotificationList.h"
+ 
+ static void TestMessages()
+ {
+@@ -12,4 +15,35 @@
+ 	PIELogger.Message(EMessageSeverity::Type::Info, FText::FromString("This is an Info Message"));
+ }
+ 
+-FAutoConsoleCommand TestMessageLogCommand(TEXT("Slate.TestMessageLog"), TEXT(""), FConsoleCommandDelegate::CreateStatic(&TestMessages));
+\ No newline at end of file
++FAutoConsoleCommand TestMessageLogCommand(TEXT("Slate.TestMessageLog"), TEXT(""), FConsoleCommandDelegate::CreateStatic(&TestMessages));
++
++static void TestNotification()
++{
++	// Allow the console to close and the editor to regain focus before showing the toast.
++	FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateLambda([](float)
++	{
++		TSharedRef<TWeakPtr<SNotificationItem>> NotificationItem = MakeShared<TWeakPtr<SNotificationItem>>();
++		FNotificationInfo Info(NSLOCTEXT("MessageTesting", "NotificationInputTest", "Notification input test"));
++		Info.ExpireDuration = 60.0f;
++		Info.bUseThrobber = false;
++		Info.bUseSuccessFailIcons = false;
++		Info.ButtonDetails.Add(FNotificationButtonInfo(
++			NSLOCTEXT("MessageTesting", "DismissNotificationInputTest", "Dismiss"),
++			NSLOCTEXT("MessageTesting", "DismissNotificationInputTestTooltip", "Dismiss this test notification"),
++			FSimpleDelegate::CreateLambda([NotificationItem]()
++			{
++				if (TSharedPtr<SNotificationItem> Item = NotificationItem->Pin())
++				{
++					Item->SetExpireDuration(0.0f);
++					Item->ExpireAndFadeout();
++				}
++			}), SNotificationItem::CS_None));
++		*NotificationItem = FSlateNotificationManager::Get().AddNotification(Info);
++		return false;
++	}), 3.0f);
++}
++
++FAutoConsoleCommand TestNotificationCommand(
++	TEXT("Slate.TestNotification"),
++	TEXT("Show a notification with a Dismiss button after three seconds. It expires after 60 seconds."),
++	FConsoleCommandDelegate::CreateStatic(&TestNotification));

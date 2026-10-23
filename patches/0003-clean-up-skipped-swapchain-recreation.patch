@@ -1,0 +1,42 @@
+--- a/Engine/Source/Runtime/VulkanRHI/Private/VulkanViewport.cpp
++++ b/Engine/Source/Runtime/VulkanRHI/Private/VulkanViewport.cpp
+@@ -509,18 +509,27 @@
+ 	else
+ 	{
+ 		PixelFormat = GetPixelFormatForNonDefaultSwapchain();
+-		if (RecreateInfo != nullptr)
+-		{
+-			if (RecreateInfo->SwapChain)
+-			{
+-				FVulkanPlatform::DestroySwapchainKHR(Device.GetHandle(), RecreateInfo->SwapChain, VULKAN_CPU_ALLOCATOR);
+-				RecreateInfo->SwapChain = VK_NULL_HANDLE;
+-			}
+-			if (RecreateInfo->Surface)
+-			{
+-				FVulkanPlatform::DestroySurface(WindowContext.GetWindowId(), FVulkanDynamicRHI::Get().Instance, RecreateInfo->Surface);
+-				RecreateInfo->Surface = VK_NULL_HANDLE;
+-			}
++	}
++
++	// FVulkanSwapChain::Create normally consumes these retained handles. If the
++	// window became invalid and creation was skipped, release them here as well.
++	// Keep the dummy-backbuffer path usable without leaking the old surface or
++	// failing the recreation callers' ownership checks.
++	if (RecreateInfo != nullptr)
++	{
++		if (RecreateInfo->SwapChain || RecreateInfo->Surface)
++		{
++			UE_LOGF(LogVulkanRHI, Verbose, "Releasing unused swapchain recreation resources for window %p.", WindowContext.GetWindowHandle());
++		}
++		if (RecreateInfo->SwapChain)
++		{
++			FVulkanPlatform::DestroySwapchainKHR(Device.GetHandle(), RecreateInfo->SwapChain, VULKAN_CPU_ALLOCATOR);
++			RecreateInfo->SwapChain = VK_NULL_HANDLE;
++		}
++		if (RecreateInfo->Surface)
++		{
++			FVulkanPlatform::DestroySurface(WindowContext.GetWindowId(), FVulkanDynamicRHI::Get().Instance, RecreateInfo->Surface);
++			RecreateInfo->Surface = VK_NULL_HANDLE;
+ 		}
+ 	}
+ 

@@ -1,0 +1,36 @@
+--- a/Engine/Source/Runtime/ApplicationCore/Private/Linux/LinuxWindow.cpp
++++ b/Engine/Source/Runtime/ApplicationCore/Private/Linux/LinuxWindow.cpp
+@@ -150,6 +150,10 @@
+ 	}
+ 
+ 	const bool bShouldActivate = Definition->ActivationPolicy != EWindowActivationPolicy::Never;
++	// Match Slate's activation policy at the native window level as well. Tooltips
++	// and notification toasts must not take keyboard focus when mapped or clicked.
++	// This does not prevent their buttons and hyperlinks from receiving mouse input.
++	SDL_SetBooleanProperty(Props, SDL_PROP_WINDOW_CREATE_FOCUSABLE_BOOLEAN, bShouldActivate);
+ 	const char *SDLWindowType = nullptr;			// use this to set the X11 Window Type if necessary
+ 
+ 	// Tooltip window. Prefer Slate's explicit owner (passed as InParent via
+--- a/Engine/Source/Runtime/ApplicationCore/Private/Linux/LinuxApplication.cpp
++++ b/Engine/Source/Runtime/ApplicationCore/Private/Linux/LinuxApplication.cpp
+@@ -1798,6 +1798,11 @@
+ 
+ void FLinuxApplication::RaiseNotificationWindows(const TSharedPtr< FLinuxWindow >& ParentWindow)
+ {
++	// Raising toasts is a stacking operation, not an activation request. Otherwise
++	// a focus-gained event can raise another toast, causing a focus/raise feedback loop.
++	const bool bActivate = SDL_GetHintBoolean(SDL_HINT_WINDOW_ACTIVATE_WHEN_RAISED, true);
++	SDL_SetHint(SDL_HINT_WINDOW_ACTIVATE_WHEN_RAISED, "0");
++
+ 	// Raise notification windows above everything except for modal windows
+ 	for (int32 WindowIndex=0; WindowIndex < NotificationWindows.Num(); ++WindowIndex)
+ 	{
+@@ -1808,6 +1813,8 @@
+ 			SDL_RaiseWindow(NotificationWindow->GetHWnd());
+ 		}
+ 	}
++
++	SDL_SetHint(SDL_HINT_WINDOW_ACTIVATE_WHEN_RAISED, bActivate ? "1" : "0");
+ }
+ 
+ void FLinuxApplication::RemoveRevertFocusWindow(SDL_HWindow HWnd)

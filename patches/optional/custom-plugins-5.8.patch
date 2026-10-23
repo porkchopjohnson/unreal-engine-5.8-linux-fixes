@@ -1,0 +1,64 @@
+--- a/Engine/Plugins/Marketplace/ClothVertexColorTools/ClothVertexColorTools.uplugin
++++ b/Engine/Plugins/Marketplace/ClothVertexColorTools/ClothVertexColorTools.uplugin
+@@ -10,7 +10,7 @@
+ 	"DocsURL": "",
+ 	"MarketplaceURL": "",
+ 	"SupportURL": "",
+-	"EngineVersion": "5.7.0",
++	"EngineVersion": "5.8.0",
+ 	"CanContainContent": false,
+ 	"IsBetaVersion": true,
+ 	"Installed": true,
+--- a/Engine/Plugins/Marketplace/PoseAssetOffsetTools/PoseAssetOffsetTools.uplugin
++++ b/Engine/Plugins/Marketplace/PoseAssetOffsetTools/PoseAssetOffsetTools.uplugin
+@@ -10,7 +10,7 @@
+ 	"DocsURL": "",
+ 	"MarketplaceURL": "",
+ 	"SupportURL": "",
+-	"EngineVersion": "5.7.0",
++	"EngineVersion": "5.8.0",
+ 	"CanContainContent": false,
+ 	"Installed": true,
+ 	"Modules": [
+--- a/Engine/Plugins/Marketplace/ClothVertexColorTools/Source/ClothVertexColorTools/ClothVertexColorTools.Build.cs
++++ b/Engine/Plugins/Marketplace/ClothVertexColorTools/Source/ClothVertexColorTools/ClothVertexColorTools.Build.cs
+@@ -5,6 +5,8 @@
+ 	public ClothVertexColorTools(ReadOnlyTargetRules Target) : base(Target)
+ 	{
+ 		PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
++		// Rebuild this custom module from source while reusing a precompiled engine.
++		bUsePrecompiled = false;
+ 		// Node implementations reuse file-local helper names and need separate translation units.
+ 		bUseUnity = false;
+ 
+--- a/Engine/Plugins/Marketplace/PoseAssetOffsetTools/Source/PoseAssetOffsetTools/PoseAssetOffsetTools.Build.cs
++++ b/Engine/Plugins/Marketplace/PoseAssetOffsetTools/Source/PoseAssetOffsetTools/PoseAssetOffsetTools.Build.cs
+@@ -5,6 +5,8 @@
+ 	public PoseAssetOffsetTools(ReadOnlyTargetRules Target) : base(Target)
+ 	{
+ 		PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
++		// Rebuild this custom module from source while reusing a precompiled engine.
++		bUsePrecompiled = false;
+ 
+ 		PublicDependencyModuleNames.AddRange(new string[]
+ 		{
+--- a/Engine/Plugins/Marketplace/PoseAssetOffsetTools/Source/PoseAssetOffsetTools/Private/PoseAssetOffsetToolsLibrary.cpp
++++ b/Engine/Plugins/Marketplace/PoseAssetOffsetTools/Source/PoseAssetOffsetTools/Private/PoseAssetOffsetToolsLibrary.cpp
+@@ -196,7 +196,7 @@
+ 		MeshComponent->SetSkeletalMesh(PreviewMesh, true);
+ 	}
+ 
+-	for (const TPair<FString, TSharedPtr<FJsonValue>>& PosePair : RootObject->Values)
++	for (const auto& PosePair : RootObject->Values)
+ 	{
+ 		const FName PoseName(*PosePair.Key);
+ 		const TSharedPtr<FJsonObject> BoneObject = PosePair.Value->AsObject();
+@@ -208,7 +208,7 @@
+ 
+ 		TArray<FTransform> LocalPose = RefPose;
+ 
+-		for (const TPair<FString, TSharedPtr<FJsonValue>>& BonePair : BoneObject->Values)
++		for (const auto& BonePair : BoneObject->Values)
+ 		{
+ 			const FName BoneName(*BonePair.Key);
+ 			const int32 BoneIndex = RefSkeleton.FindBoneIndex(BoneName);

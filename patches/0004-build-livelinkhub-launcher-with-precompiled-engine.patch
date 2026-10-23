@@ -1,0 +1,12 @@
+--- a/Engine/Source/Programs/LiveLinkHub/Source/LiveLinkHubLauncher/LiveLinkHubLauncher.Build.cs
++++ b/Engine/Source/Programs/LiveLinkHub/Source/LiveLinkHubLauncher/LiveLinkHubLauncher.Build.cs
+@@ -14,6 +14,9 @@
+ {
+ 	public LiveLinkHubLauncher(ReadOnlyTargetRules Target) : base(Target)
+ 	{
++		// Build the standalone launcher while reusing the existing editor engine modules.
++		bUsePrecompiled = false;
++
+ 		PrivateDependencyModuleNames.AddRange(
+ 			new string[] {
+ 				"LiveLinkHub",
