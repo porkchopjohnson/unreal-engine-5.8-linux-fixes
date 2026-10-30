@@ -14,6 +14,7 @@ This repository records the fixes used in a local Fedora/Linux source build. It 
 | Clean up retained Vulkan swapchain resources when recreation is skipped | `VulkanViewport.cpp` | Built; the first repeated drag/dialog retest in 5.8.3 completed without freezing or crashing. Longer-term testing is still needed. |
 | Build the standalone Live Link Hub launcher against existing engine modules | `LiveLinkHubLauncher.Build.cs` | Built and started successfully through XWayland. Capture-device workflows require separate testing. |
 | Consistent editor and Hub launch settings | Shell launchers | XWayland startup verified. Editor launcher supports both the project browser and explicit project paths. |
+| KDE-backed native file chooser | `DesktopPlatformLinux.cpp` and new `PortalFileDialog` files | Built; actual Import, Save/directory diagnostics, cancellation, and URI/filter parsing tests passed. |
 
 The optional custom-plugin patch records the 5.8 migration of `ClothVertexColorTools` and `PoseAssetOffsetTools`. It is not needed for the engine fixes.
 
@@ -34,6 +35,7 @@ Those implementations are retained. These patches are the remaining local change
 - Git for applying patches.
 - Bash and Linux `readlink` for the launchers.
 - Python 3 only if using the patch verification tool.
+- For native file dialogs: `xdg-desktop-portal`, an appropriate backend such as `xdg-desktop-portal-kde`, and runtime `libsystemd.so.0`. Slate remains the fallback when unavailable.
 
 ## Apply the patches
 
@@ -55,6 +57,7 @@ The patches are ordered:
 2. Notification test command.
 3. Vulkan swapchain cleanup.
 4. Live Link Hub launcher build setting.
+5. Desktop-portal Open, Save, and directory pickers.
 
 They have been checked against the original `UnrealEngine-5.8.3-release.zip` used for this build. If `git apply --check` reports a conflict, inspect the source differences before applying. Do not apply them a second time to an already patched tree.
 
@@ -97,6 +100,12 @@ Slate marks standard notifications with `EWindowActivationPolicy::Never`. The na
 Raising a notification must also be a stacking operation rather than an activation request. Otherwise a focus event can raise another notification, which gains focus and raises the notifications again. The failing investigation recorded hundreds of thousands of focus events and severe lag with overlapping toasts.
 
 The fix maps Slate's policy to `SDL_PROP_WINDOW_CREATE_FOCUSABLE_BOOLEAN` and temporarily disables `SDL_HINT_WINDOW_ACTIVATE_WHEN_RAISED` around notification raising.
+
+## KDE-backed file dialogs
+
+The Linux Import/Open, Save, and directory interfaces can now use the desktop portal's file chooser instead of the basic Slate picker. On Plasma this provides KDE's native chooser and Places sidebar. Cancellation does not open a second picker, and the original Slate implementation remains available as a fallback.
+
+See [PORTAL-FILE-DIALOGS.md](PORTAL-FILE-DIALOGS.md) for requirements, the scoped module build, test commands, remote-file considerations, and the `Linux.FileDialogs.UsePortal` switch.
 
 ## Menu focus-restoring clicks
 

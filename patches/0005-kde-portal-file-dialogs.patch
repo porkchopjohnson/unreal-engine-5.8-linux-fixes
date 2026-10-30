@@ -1,0 +1,617 @@
+diff --git a/Engine/Source/Developer/DesktopPlatform/Private/Linux/DesktopPlatformLinux.cpp b/Engine/Source/Developer/DesktopPlatform/Private/Linux/DesktopPlatformLinux.cpp
+index bc4a5b3..c3dff64 100644
+--- a/Engine/Source/Developer/DesktopPlatform/Private/Linux/DesktopPlatformLinux.cpp
++++ b/Engine/Source/Developer/DesktopPlatform/Private/Linux/DesktopPlatformLinux.cpp
+@@ -17,6 +17,7 @@
+ //#include "LinuxNativeFeedbackContext.h"
+ #include "ISlateFileDialogModule.h"
+ #include "ISlateFontDialogModule.h" 
++#include "Linux/PortalFileDialog.h"
+ 
+ #define LOCTEXT_NAMESPACE "DesktopPlatform"
+ #define MAX_FILETYPES_STR 4096
+@@ -33,6 +34,13 @@ FDesktopPlatformLinux::~FDesktopPlatformLinux()
+ 
+ bool FDesktopPlatformLinux::OpenFileDialog(const void* ParentWindowHandle, const FString& DialogTitle, const FString& DefaultPath, const FString& DefaultFile, const FString& FileTypes, uint32 Flags, TArray<FString>& OutFilenames, int32& OutFilterIndex)
+ {
++	const LinuxPortalFileDialog::EResult PortalResult = LinuxPortalFileDialog::Show(LinuxPortalFileDialog::EType::Open,
++		ParentWindowHandle, DialogTitle, DefaultPath, DefaultFile, FileTypes, Flags, OutFilenames, OutFilterIndex);
++	if (PortalResult != LinuxPortalFileDialog::EResult::Unavailable)
++	{
++		return PortalResult == LinuxPortalFileDialog::EResult::Accepted;
++	}
++
+ 	if (!FModuleManager::Get().IsModuleLoaded("SlateFileDialogs"))
+ 	{
+ 		FModuleManager::Get().LoadModule("SlateFileDialogs");
+@@ -50,23 +58,20 @@ bool FDesktopPlatformLinux::OpenFileDialog(const void* ParentWindowHandle, const
+ 
+ bool FDesktopPlatformLinux::OpenFileDialog(const void* ParentWindowHandle, const FString& DialogTitle, const FString& DefaultPath, const FString& DefaultFile, const FString& FileTypes, uint32 Flags, TArray<FString>& OutFilenames)
+ {
+-	if (!FModuleManager::Get().IsModuleLoaded("SlateFileDialogs"))
+-	{
+-		FModuleManager::Get().LoadModule("SlateFileDialogs");
+-	}
+-
+-	ISlateFileDialogsModule *FileDialog = FModuleManager::GetModulePtr<ISlateFileDialogsModule>("SlateFileDialogs");
+-
+-	if (FileDialog)
+-	{
+-		return FileDialog->OpenFileDialog(ParentWindowHandle, DialogTitle, DefaultPath, DefaultFile, FileTypes, Flags, OutFilenames);
+-	}
+-
+-	return false;
++	int32 FilterIndex = 0;
++	return OpenFileDialog(ParentWindowHandle, DialogTitle, DefaultPath, DefaultFile, FileTypes, Flags, OutFilenames, FilterIndex);
+ }
+ 
+ bool FDesktopPlatformLinux::SaveFileDialog(const void* ParentWindowHandle, const FString& DialogTitle, const FString& DefaultPath, const FString& DefaultFile, const FString& FileTypes, uint32 Flags, TArray<FString>& OutFilenames)
+ {
++	int32 FilterIndex = 0;
++	const LinuxPortalFileDialog::EResult PortalResult = LinuxPortalFileDialog::Show(LinuxPortalFileDialog::EType::Save,
++		ParentWindowHandle, DialogTitle, DefaultPath, DefaultFile, FileTypes, Flags, OutFilenames, FilterIndex);
++	if (PortalResult != LinuxPortalFileDialog::EResult::Unavailable)
++	{
++		return PortalResult == LinuxPortalFileDialog::EResult::Accepted;
++	}
++
+ 	if (!FModuleManager::Get().IsModuleLoaded("SlateFileDialogs"))
+ 	{
+ 		FModuleManager::Get().LoadModule("SlateFileDialogs");
+@@ -84,6 +89,20 @@ bool FDesktopPlatformLinux::SaveFileDialog(const void* ParentWindowHandle, const
+ 
+ bool FDesktopPlatformLinux::OpenDirectoryDialog(const void* ParentWindowHandle, const FString& DialogTitle, const FString& DefaultPath, FString& OutFolderName)
+ {
++	TArray<FString> Folders;
++	int32 FilterIndex = 0;
++	const LinuxPortalFileDialog::EResult PortalResult = LinuxPortalFileDialog::Show(LinuxPortalFileDialog::EType::Directory,
++		ParentWindowHandle, DialogTitle, DefaultPath, FString(), FString(), 0, Folders, FilterIndex);
++	if (PortalResult != LinuxPortalFileDialog::EResult::Unavailable)
++	{
++		if (PortalResult == LinuxPortalFileDialog::EResult::Accepted && !Folders.IsEmpty())
++		{
++			OutFolderName = MoveTemp(Folders[0]);
++			return true;
++		}
++		return false;
++	}
++
+ 	if (!FModuleManager::Get().IsModuleLoaded("SlateFileDialogs"))
+ 	{
+ 		FModuleManager::Get().LoadModule("SlateFileDialogs");
+diff --git a/Engine/Source/Developer/DesktopPlatform/Private/Linux/PortalFileDialog.cpp b/Engine/Source/Developer/DesktopPlatform/Private/Linux/PortalFileDialog.cpp
+new file mode 100644
+index 0000000..d5ea9b5
+--- /dev/null
++++ b/Engine/Source/Developer/DesktopPlatform/Private/Linux/PortalFileDialog.cpp
+@@ -0,0 +1,508 @@
++#include "Linux/PortalFileDialog.h"
++
++#include "DesktopPlatformPrivate.h"
++#include "HAL/IConsoleManager.h"
++#include "HAL/PlatformProcess.h"
++#include "HAL/ThreadHeartBeat.h"
++#include "IDesktopPlatform.h"
++#include "Misc/App.h"
++#include "Misc/Guid.h"
++#include "Misc/Paths.h"
++#include "Misc/ScopeExit.h"
++#include <SDL3/SDL.h>
++
++#if WITH_DEV_AUTOMATION_TESTS
++#include "Misc/AutomationTest.h"
++#endif
++
++namespace LinuxPortalFileDialog
++{
++namespace
++{
++	static TAutoConsoleVariable<int32> CVarUsePortal(
++		TEXT("Linux.FileDialogs.UsePortal"), 1,
++		TEXT("Use the desktop portal file chooser on Linux. Set to 0 to use Slate file dialogs."));
++
++	// sd-bus exposes opaque connection/message types. Load the stable C ABI at runtime
++	// so DesktopPlatform needs no systemd headers or additional link-time dependencies.
++	struct sd_bus;
++	struct sd_bus_message;
++	struct sd_bus_slot;
++	struct sd_bus_error;
++	using FBusHandler = int (*)(sd_bus_message*, void*, sd_bus_error*);
++
++#define PORTAL_BUS_FUNCTIONS(X) \
++	X(sd_bus_open_user, int, (sd_bus**)) \
++	X(sd_bus_unref, sd_bus*, (sd_bus*)) \
++	X(sd_bus_get_unique_name, int, (sd_bus*, const char**)) \
++	X(sd_bus_get_property_trivial, int, (sd_bus*, const char*, const char*, const char*, const char*, sd_bus_error*, char, void*)) \
++	X(sd_bus_message_new_method_call, int, (sd_bus*, sd_bus_message**, const char*, const char*, const char*, const char*)) \
++	X(sd_bus_message_append, int, (sd_bus_message*, const char*, ...)) \
++	X(sd_bus_message_append_array, int, (sd_bus_message*, char, const void*, size_t)) \
++	X(sd_bus_message_open_container, int, (sd_bus_message*, char, const char*)) \
++	X(sd_bus_message_close_container, int, (sd_bus_message*)) \
++	X(sd_bus_message_enter_container, int, (sd_bus_message*, char, const char*)) \
++	X(sd_bus_message_exit_container, int, (sd_bus_message*)) \
++	X(sd_bus_message_read, int, (sd_bus_message*, const char*, ...)) \
++	X(sd_bus_message_skip, int, (sd_bus_message*, const char*)) \
++	X(sd_bus_message_get_path, const char*, (sd_bus_message*)) \
++	X(sd_bus_message_unref, sd_bus_message*, (sd_bus_message*)) \
++	X(sd_bus_add_match, int, (sd_bus*, sd_bus_slot**, const char*, FBusHandler, void*)) \
++	X(sd_bus_slot_unref, sd_bus_slot*, (sd_bus_slot*)) \
++	X(sd_bus_call, int, (sd_bus*, sd_bus_message*, uint64, sd_bus_error*, sd_bus_message**)) \
++	X(sd_bus_process, int, (sd_bus*, sd_bus_message**)) \
++	X(sd_bus_wait, int, (sd_bus*, uint64))
++
++	struct FBusAPI
++	{
++#define DECLARE_BUS_FUNCTION(Name, Return, Arguments) Return (*Name) Arguments = nullptr;
++		PORTAL_BUS_FUNCTIONS(DECLARE_BUS_FUNCTION)
++#undef DECLARE_BUS_FUNCTION
++		void* Library = nullptr;
++		bool bAvailable = false;
++
++		FBusAPI()
++		{
++			Library = FPlatformProcess::GetDllHandle(TEXT("libsystemd.so.0"));
++			if (!Library)
++			{
++				return;
++			}
++			bAvailable = true;
++#define LOAD_BUS_FUNCTION(Name, Return, Arguments) \
++			Name = reinterpret_cast<decltype(Name)>(FPlatformProcess::GetDllExport(Library, TEXT(#Name))); \
++			bAvailable = bAvailable && Name != nullptr;
++			PORTAL_BUS_FUNCTIONS(LOAD_BUS_FUNCTION)
++#undef LOAD_BUS_FUNCTION
++		}
++
++		~FBusAPI()
++		{
++			if (Library)
++			{
++				FPlatformProcess::FreeDllHandle(Library);
++			}
++		}
++	};
++#undef PORTAL_BUS_FUNCTIONS
++
++	struct FFilter
++	{
++		FString Name;
++		TArray<FString> Patterns;
++		int32 OriginalIndex = 0;
++	};
++
++	FString PortalPattern(const FString& Pattern)
++	{
++		if (Pattern == TEXT("*.*"))
++		{
++			return TEXT("*");
++		}
++		// Portal globs are case-sensitive, unlike Slate's extension matching.
++		if (Pattern.StartsWith(TEXT("*.")) && !Pattern.Contains(TEXT("[")) && !Pattern.Contains(TEXT("?")))
++		{
++			FString Result;
++			for (TCHAR Character : Pattern)
++			{
++				if ((Character >= TEXT('a') && Character <= TEXT('z')) || (Character >= TEXT('A') && Character <= TEXT('Z')))
++				{
++					Result += FString::Printf(TEXT("[%c%c]"), FChar::ToLower(Character), FChar::ToUpper(Character));
++				}
++				else
++				{
++					Result.AppendChar(Character);
++				}
++			}
++			return Result;
++		}
++		return Pattern;
++	}
++
++	TArray<FFilter> ParseFilters(const FString& FileTypes)
++	{
++		TArray<FString> Parts;
++		FileTypes.ParseIntoArray(Parts, TEXT("|"), false);
++		TArray<FFilter> Filters;
++		for (int32 Index = 0; Index + 1 < Parts.Num(); Index += 2)
++		{
++			FFilter Filter;
++			Filter.Name = Parts[Index].IsEmpty() ? Parts[Index + 1] : Parts[Index];
++			Filter.OriginalIndex = Index / 2;
++			TArray<FString> Patterns;
++			Parts[Index + 1].ParseIntoArray(Patterns, TEXT(";"), true);
++			for (FString& Pattern : Patterns)
++			{
++				Pattern.TrimStartAndEndInline();
++				if (!Pattern.IsEmpty())
++				{
++					Filter.Patterns.Add(PortalPattern(Pattern));
++				}
++			}
++			if (!Filter.Patterns.IsEmpty())
++			{
++				Filters.Add(MoveTemp(Filter));
++			}
++		}
++		return Filters;
++	}
++
++	bool LocalPathFromURI(const FString& URI, FString& OutPath)
++	{
++		if (!URI.StartsWith(TEXT("file://"), ESearchCase::IgnoreCase))
++		{
++			return false;
++		}
++		FString Encoded = URI.Mid(7);
++		if (!Encoded.StartsWith(TEXT("/")))
++		{
++			int32 Slash;
++			if (!Encoded.FindChar(TEXT('/'), Slash) || !Encoded.Left(Slash).Equals(TEXT("localhost"), ESearchCase::IgnoreCase))
++			{
++				return false;
++			}
++			Encoded.RightChopInline(Slash);
++		}
++		FTCHARToUTF8 UTF8(*Encoded);
++		TArray<ANSICHAR> Bytes;
++		auto Hex = [](ANSICHAR Character) -> int32
++		{
++			if (Character >= '0' && Character <= '9') return Character - '0';
++			if (Character >= 'a' && Character <= 'f') return Character - 'a' + 10;
++			if (Character >= 'A' && Character <= 'F') return Character - 'A' + 10;
++			return -1;
++		};
++		for (int32 Index = 0; Index < UTF8.Length(); ++Index)
++		{
++			ANSICHAR Byte = UTF8.Get()[Index];
++			if (Byte == '%')
++			{
++				if (Index + 2 >= UTF8.Length()) return false;
++				const int32 High = Hex(UTF8.Get()[Index + 1]);
++				const int32 Low = Hex(UTF8.Get()[Index + 2]);
++				if (High < 0 || Low < 0) return false;
++				Byte = static_cast<ANSICHAR>((High << 4) | Low);
++				Index += 2;
++			}
++			if (Byte == '\0') return false;
++			Bytes.Add(Byte);
++		}
++		Bytes.Add('\0');
++		OutPath = UTF8_TO_TCHAR(Bytes.GetData());
++		FPaths::NormalizeFilename(OutPath);
++		return OutPath.StartsWith(TEXT("/"));
++	}
++
++	struct FResponse
++	{
++		explicit FResponse(FBusAPI& InAPI) : API(InAPI) {}
++		FBusAPI& API;
++		FString RequestPrefix;
++		TArray<FString> Files;
++		FString FilterName;
++		TArray<FString> FilterPatterns;
++		FString Error;
++		EResult Result = EResult::Failed;
++		bool bDone = false;
++	};
++
++	int ResponseReceived(sd_bus_message* Message, void* UserData, sd_bus_error*)
++	{
++		FResponse& Response = *static_cast<FResponse*>(UserData);
++		FBusAPI& API = Response.API;
++		const char* Path = API.sd_bus_message_get_path(Message);
++		if (!Path || !FString(UTF8_TO_TCHAR(Path)).StartsWith(Response.RequestPrefix)) return 0;
++		Response.bDone = true;
++		uint32 Code = 2;
++		if (API.sd_bus_message_read(Message, "u", &Code) <= 0) return 1;
++		if (Code == 1)
++		{
++			Response.Result = EResult::Cancelled;
++			return 1;
++		}
++		if (Code != 0 || API.sd_bus_message_enter_container(Message, 'a', "{sv}") <= 0) return 1;
++		while (API.sd_bus_message_enter_container(Message, 'e', "sv") > 0)
++		{
++			const char* Key = nullptr;
++			if (API.sd_bus_message_read(Message, "s", &Key) <= 0) return 1;
++			if (FCStringAnsi::Strcmp(Key, "uris") == 0)
++			{
++				if (API.sd_bus_message_enter_container(Message, 'v', "as") <= 0 || API.sd_bus_message_enter_container(Message, 'a', "s") <= 0) return 1;
++				const char* URI = nullptr;
++				int Read;
++				while ((Read = API.sd_bus_message_read(Message, "s", &URI)) > 0)
++				{
++					FString LocalPath;
++					if (!LocalPathFromURI(UTF8_TO_TCHAR(URI), LocalPath))
++					{
++						Response.Error = TEXT("The file chooser returned an unsupported or malformed file URI.");
++						return 1;
++					}
++					Response.Files.Add(MoveTemp(LocalPath));
++				}
++				if (Read < 0 || API.sd_bus_message_exit_container(Message) < 0 || API.sd_bus_message_exit_container(Message) < 0) return 1;
++			}
++			else if (FCStringAnsi::Strcmp(Key, "current_filter") == 0)
++			{
++				const char* Name = nullptr;
++				if (API.sd_bus_message_enter_container(Message, 'v', "(sa(us))") <= 0 || API.sd_bus_message_enter_container(Message, 'r', "sa(us)") <= 0 ||
++					API.sd_bus_message_read(Message, "s", &Name) <= 0 || API.sd_bus_message_enter_container(Message, 'a', "(us)") <= 0) return 1;
++				Response.FilterName = UTF8_TO_TCHAR(Name);
++				while (API.sd_bus_message_enter_container(Message, 'r', "us") > 0)
++				{
++					uint32 Kind;
++					const char* Pattern = nullptr;
++					if (API.sd_bus_message_read(Message, "us", &Kind, &Pattern) <= 0) return 1;
++					if (Kind == 0) Response.FilterPatterns.Add(UTF8_TO_TCHAR(Pattern));
++					if (API.sd_bus_message_exit_container(Message) < 0) return 1;
++				}
++				if (API.sd_bus_message_exit_container(Message) < 0 || API.sd_bus_message_exit_container(Message) < 0 || API.sd_bus_message_exit_container(Message) < 0) return 1;
++			}
++			else if (API.sd_bus_message_skip(Message, "v") < 0)
++			{
++				return 1;
++			}
++			if (API.sd_bus_message_exit_container(Message) < 0) return 1;
++		}
++		if (API.sd_bus_message_exit_container(Message) < 0) return 1;
++		Response.Result = Response.Files.IsEmpty() ? EResult::Failed : EResult::Accepted;
++		return 1;
++	}
++
++	int PortalOwnerChanged(sd_bus_message* Message, void* UserData, sd_bus_error*)
++	{
++		FResponse& Response = *static_cast<FResponse*>(UserData);
++		const char* Name = nullptr;
++		const char* OldOwner = nullptr;
++		const char* NewOwner = nullptr;
++		if (Response.API.sd_bus_message_read(Message, "sss", &Name, &OldOwner, &NewOwner) > 0 && NewOwner && *NewOwner == '\0')
++		{
++			Response.bDone = true;
++			Response.Result = EResult::Failed;
++			Response.Error = TEXT("The desktop portal stopped while the file chooser was open.");
++		}
++		return 0;
++	}
++
++	bool AppendFilter(FBusAPI& API, sd_bus_message* Message, const FFilter& Filter)
++	{
++		if (API.sd_bus_message_open_container(Message, 'r', "sa(us)") < 0 ||
++			API.sd_bus_message_append(Message, "s", TCHAR_TO_UTF8(*Filter.Name)) < 0 ||
++			API.sd_bus_message_open_container(Message, 'a', "(us)") < 0) return false;
++		for (const FString& Pattern : Filter.Patterns)
++		{
++			if (API.sd_bus_message_open_container(Message, 'r', "us") < 0 ||
++				API.sd_bus_message_append(Message, "us", static_cast<uint32>(0), TCHAR_TO_UTF8(*Pattern)) < 0 ||
++				API.sd_bus_message_close_container(Message) < 0) return false;
++		}
++		return API.sd_bus_message_close_container(Message) >= 0 && API.sd_bus_message_close_container(Message) >= 0;
++	}
++
++	FString ParentIdentifier(const void* ParentWindowHandle)
++	{
++		SDL_Window* Window = static_cast<SDL_Window*>(const_cast<void*>(ParentWindowHandle));
++		if (!Window) Window = SDL_GetKeyboardFocus();
++		if (!Window || SDL_GetWindowID(Window) == 0) return FString();
++		const SDL_PropertiesID Properties = SDL_GetWindowProperties(Window);
++		const Sint64 XID = SDL_GetNumberProperty(Properties, SDL_PROP_WINDOW_X11_WINDOW_NUMBER, 0);
++		if (XID != 0) return FString::Printf(TEXT("x11:%llx"), static_cast<unsigned long long>(XID));
++		const char* WaylandHandle = SDL_GetStringProperty(Properties, SDL_PROP_WINDOW_WAYLAND_XDG_TOPLEVEL_EXPORT_HANDLE_STRING, nullptr);
++		return WaylandHandle ? FString(TEXT("wayland:")) + UTF8_TO_TCHAR(WaylandHandle) : FString();
++	}
++}
++
++EResult Show(EType Type, const void* ParentWindowHandle, const FString& Title,
++	const FString& DefaultPath, const FString& DefaultFile, const FString& FileTypes,
++	uint32 Flags, TArray<FString>& OutFilenames, int32& OutFilterIndex)
++{
++	if (!IsInGameThread() || CVarUsePortal.GetValueOnGameThread() == 0 || !SDL_WasInit(SDL_INIT_VIDEO)) return EResult::Unavailable;
++	static FBusAPI API;
++	if (!API.bAvailable) return EResult::Unavailable;
++	sd_bus* Bus = nullptr;
++	if (API.sd_bus_open_user(&Bus) < 0) return EResult::Unavailable;
++	sd_bus_slot* ResponseSlot = nullptr;
++	sd_bus_slot* OwnerSlot = nullptr;
++	sd_bus_message* Message = nullptr;
++	sd_bus_message* Reply = nullptr;
++	ON_SCOPE_EXIT
++	{
++		if (ResponseSlot) API.sd_bus_slot_unref(ResponseSlot);
++		if (OwnerSlot) API.sd_bus_slot_unref(OwnerSlot);
++		if (Reply) API.sd_bus_message_unref(Reply);
++		if (Message) API.sd_bus_message_unref(Message);
++		API.sd_bus_unref(Bus);
++	};
++	constexpr const char* Destination = "org.freedesktop.portal.Desktop";
++	constexpr const char* ObjectPath = "/org/freedesktop/portal/desktop";
++	constexpr const char* Interface = "org.freedesktop.portal.FileChooser";
++	uint32 Version = 0;
++	if (API.sd_bus_get_property_trivial(Bus, Destination, ObjectPath, Interface, "version", nullptr, 'u', &Version) < 0 ||
++		(Type == EType::Directory && Version < 3)) return EResult::Unavailable;
++
++	const char* UniqueName = nullptr;
++	if (API.sd_bus_get_unique_name(Bus, &UniqueName) < 0 || !UniqueName) return EResult::Unavailable;
++	FString Sender = UTF8_TO_TCHAR(UniqueName);
++	Sender.RemoveFromStart(TEXT(":"));
++	Sender.ReplaceInline(TEXT("."), TEXT("_"));
++	FResponse Response{ API };
++	Response.RequestPrefix = FString(TEXT("/org/freedesktop/portal/desktop/request/")) + Sender + TEXT("/");
++	// Subscribe before opening the picker; the response may arrive during sd_bus_call.
++	// A private connection owns only this request, so match any request path for its sender.
++	if (API.sd_bus_add_match(Bus, &ResponseSlot,
++		"type='signal',sender='org.freedesktop.portal.Desktop',interface='org.freedesktop.portal.Request',member='Response'",
++		ResponseReceived, &Response) < 0 || API.sd_bus_add_match(Bus, &OwnerSlot,
++		"type='signal',sender='org.freedesktop.DBus',interface='org.freedesktop.DBus',member='NameOwnerChanged',arg0='org.freedesktop.portal.Desktop'",
++		PortalOwnerChanged, &Response) < 0) return EResult::Unavailable;
++	if (API.sd_bus_message_new_method_call(Bus, &Message, Destination, ObjectPath, Interface, Type == EType::Save ? "SaveFile" : "OpenFile") < 0) return EResult::Unavailable;
++	const FString Parent = ParentIdentifier(ParentWindowHandle);
++	if (API.sd_bus_message_append(Message, "ss", TCHAR_TO_UTF8(*Parent), TCHAR_TO_UTF8(*Title)) < 0 ||
++		API.sd_bus_message_open_container(Message, 'a', "{sv}") < 0) return EResult::Unavailable;
++	auto BeginOption = [&](const char* Key, const char* Signature)
++	{
++		return API.sd_bus_message_open_container(Message, 'e', "sv") >= 0 && API.sd_bus_message_append(Message, "s", Key) >= 0 &&
++			API.sd_bus_message_open_container(Message, 'v', Signature) >= 0;
++	};
++	auto EndOption = [&]() { return API.sd_bus_message_close_container(Message) >= 0 && API.sd_bus_message_close_container(Message) >= 0; };
++	auto BoolOption = [&](const char* Key, bool Value) { return BeginOption(Key, "b") && API.sd_bus_message_append(Message, "b", Value ? 1 : 0) >= 0 && EndOption(); };
++	auto StringOption = [&](const char* Key, const FString& Value) { return BeginOption(Key, "s") && API.sd_bus_message_append(Message, "s", TCHAR_TO_UTF8(*Value)) >= 0 && EndOption(); };
++	auto PathOption = [&](const char* Key, const FString& Value)
++	{
++		FTCHARToUTF8 UTF8(*Value);
++		return BeginOption(Key, "ay") && API.sd_bus_message_append_array(Message, 'y', UTF8.Get(), static_cast<size_t>(UTF8.Length()) + 1) >= 0 && EndOption();
++	};
++	if (!StringOption("handle_token", FString(TEXT("ue_")) + FGuid::NewGuid().ToString(EGuidFormats::Digits)) ||
++		!BoolOption("modal", true) || !BoolOption("multiple", Type == EType::Open && (Flags & EFileDialogFlags::Multiple) != 0) ||
++		!BoolOption("directory", Type == EType::Directory)) return EResult::Unavailable;
++
++	FString Folder = DefaultPath;
++	if (!DefaultFile.IsEmpty() && !FPaths::IsRelative(DefaultFile)) Folder = FPaths::GetPath(DefaultFile);
++	if (Folder.IsEmpty()) Folder = FPlatformProcess::UserDir();
++	Folder = FPaths::ConvertRelativePathToFull(Folder);
++	FPaths::NormalizeDirectoryName(Folder);
++	if (!PathOption("current_folder", Folder)) return EResult::Unavailable;
++	if (Type == EType::Save && !DefaultFile.IsEmpty())
++	{
++		if (!StringOption("current_name", FPaths::GetCleanFilename(DefaultFile))) return EResult::Unavailable;
++		const FString CurrentFile = FPaths::IsRelative(DefaultFile) ? FPaths::Combine(Folder, DefaultFile) : DefaultFile;
++		if (FPaths::FileExists(CurrentFile) && !PathOption("current_file", CurrentFile)) return EResult::Unavailable;
++	}
++	const TArray<FFilter> Filters = Type == EType::Directory ? TArray<FFilter>() : ParseFilters(FileTypes);
++	if (!Filters.IsEmpty())
++	{
++		if (!BeginOption("filters", "a(sa(us))") || API.sd_bus_message_open_container(Message, 'a', "(sa(us))") < 0) return EResult::Unavailable;
++		for (const FFilter& Filter : Filters) if (!AppendFilter(API, Message, Filter)) return EResult::Unavailable;
++		if (API.sd_bus_message_close_container(Message) < 0 || !EndOption() ||
++			!BeginOption("current_filter", "(sa(us))") || !AppendFilter(API, Message, Filters[0]) || !EndOption()) return EResult::Unavailable;
++	}
++	if (API.sd_bus_message_close_container(Message) < 0) return EResult::Unavailable;
++
++	FSlowHeartBeatScope SuspendHeartBeat(true);
++	FDisableHitchDetectorScope SuspendHitchDetector;
++	FScopedSystemModalMode ModalScope;
++	// This call only opens the request; the user interaction is asynchronous and has no timeout.
++	const int CallResult = API.sd_bus_call(Bus, Message, 10'000'000, nullptr, &Reply);
++	if (CallResult < 0)
++	{
++		UE_LOGF(LogDesktopPlatform, Warning, "Desktop portal file chooser is unavailable (D-Bus error %d); using Slate.", CallResult);
++		return EResult::Unavailable;
++	}
++	const char* Handle = nullptr;
++	if (API.sd_bus_message_read(Reply, "o", &Handle) <= 0 || !Handle) return EResult::Failed;
++	const FString RequestPath = UTF8_TO_TCHAR(Handle);
++	UE_LOGF(LogDesktopPlatform, Log, "Opened desktop portal %s file chooser: %ls", Type == EType::Save ? "Save" : Type == EType::Directory ? "Directory" : "Open", *Title);
++	while (!Response.bDone)
++	{
++		int ProcessResult;
++		do { ProcessResult = API.sd_bus_process(Bus, nullptr); } while (ProcessResult > 0 && !Response.bDone);
++		if (ProcessResult < 0 || IsEngineExitRequested() || SDL_HasEvent(SDL_EVENT_QUIT))
++		{
++			Response.Result = IsEngineExitRequested() || SDL_HasEvent(SDL_EVENT_QUIT) ? EResult::Cancelled : EResult::Failed;
++			break;
++		}
++		if (!Response.bDone)
++		{
++			// Service native window-manager messages without dispatching input into the
++			// editor while its synchronous file-dialog caller is on the stack.
++			SDL_PumpEvents();
++			if (API.sd_bus_wait(Bus, 16'000) < 0) break;
++		}
++	}
++	if (!Response.bDone)
++	{
++		sd_bus_message* Close = nullptr;
++		if (API.sd_bus_message_new_method_call(Bus, &Close, Destination, TCHAR_TO_UTF8(*RequestPath), "org.freedesktop.portal.Request", "Close") >= 0)
++		{
++			API.sd_bus_call(Bus, Close, 2'000'000, nullptr, nullptr);
++			API.sd_bus_message_unref(Close);
++		}
++	}
++	if (Response.Result == EResult::Accepted)
++	{
++		OutFilterIndex = 0;
++		for (const FFilter& Filter : Filters)
++		{
++			if (Filter.Name == Response.FilterName && (Response.FilterPatterns.IsEmpty() || Filter.Patterns == Response.FilterPatterns))
++			{
++				OutFilterIndex = Filter.OriginalIndex;
++				break;
++			}
++		}
++		OutFilenames = MoveTemp(Response.Files);
++		UE_LOGF(LogDesktopPlatform, Log, "Desktop portal selected %d path(s), filter index %d.", OutFilenames.Num(), OutFilterIndex);
++	}
++	else if (Response.Result == EResult::Failed)
++	{
++		UE_LOGF(LogDesktopPlatform, Warning, "Desktop portal file chooser failed: %ls", Response.Error.IsEmpty() ? TEXT("Invalid or unsuccessful portal response") : *Response.Error);
++	}
++	return Response.Result;
++}
++
++#if !UE_BUILD_SHIPPING
++static FAutoConsoleCommand TestPortalFileDialog(
++	TEXT("Linux.FileDialogs.Test"),
++	TEXT("Test the desktop portal picker: Linux.FileDialogs.Test open|save|directory. Does not import or write files."),
++	FConsoleCommandWithArgsDelegate::CreateLambda([](const TArray<FString>& Args)
++	{
++		const FString Mode = Args.IsEmpty() ? TEXT("open") : Args[0].ToLower();
++		const EType Type = Mode == TEXT("save") ? EType::Save : Mode == TEXT("directory") ? EType::Directory : EType::Open;
++		TArray<FString> Files;
++		int32 FilterIndex = 0;
++		const EResult Result = Show(Type, nullptr, FString(TEXT("Unreal portal picker test: ")) + Mode,
++			FPlatformProcess::UserDir(), Type == EType::Save ? TEXT("Portal picker test.fbx") : TEXT(""),
++			TEXT("Meshes|*.fbx;*.obj|All files|*.*"), EFileDialogFlags::Multiple, Files, FilterIndex);
++		UE_LOGF(LogDesktopPlatform, Display, "Portal picker test result=%d, filter=%d, paths=%d", static_cast<int32>(Result), FilterIndex, Files.Num());
++		for (const FString& File : Files)
++		{
++			UE_LOGF(LogDesktopPlatform, Display, "Portal picker test path: %ls", *File);
++		}
++	}));
++#endif
++
++#if WITH_DEV_AUTOMATION_TESTS
++IMPLEMENT_SIMPLE_AUTOMATION_TEST(FPortalFileDialogParsingTest, "System.DesktopPlatform.LinuxPortal.Parsing",
++	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
++
++bool FPortalFileDialogParsingTest::RunTest(const FString& Parameters)
++{
++	FString Path;
++	TestTrue(TEXT("Decode spaces and preserve plus"), LocalPathFromURI(TEXT("file:///tmp/a%20b%2Bc.fbx"), Path));
++	TestEqual(TEXT("Decoded path"), Path, FString(TEXT("/tmp/a b+c.fbx")));
++	TestTrue(TEXT("UTF-8 and localhost"), LocalPathFromURI(TEXT("file://localhost/tmp/caf%C3%A9+mesh.fbx"), Path));
++	TestEqual(TEXT("Unicode path"), Path, FString(TEXT("/tmp/caf\u00e9+mesh.fbx")));
++	TestFalse(TEXT("Remote URL must be materialized locally by the portal"), LocalPathFromURI(TEXT("smb://server/share/file.fbx"), Path));
++	TestFalse(TEXT("Non-local file authority"), LocalPathFromURI(TEXT("file://server/share/file.fbx"), Path));
++	TestFalse(TEXT("Reject embedded NUL"), LocalPathFromURI(TEXT("file:///tmp/file%00.fbx"), Path));
++	TestFalse(TEXT("Reject malformed escape"), LocalPathFromURI(TEXT("file:///tmp/file%QZ.fbx"), Path));
++	TestFalse(TEXT("Reject truncated escape"), LocalPathFromURI(TEXT("file:///tmp/file%2"), Path));
++	const TArray<FFilter> Filters = ParseFilters(TEXT("Meshes|*.fbx;*.obj|All files|*.*"));
++	TestEqual(TEXT("Filter count"), Filters.Num(), 2);
++	if (Filters.Num() == 2)
++	{
++		TestEqual(TEXT("Case-insensitive extension glob"), Filters[0].Patterns[0], FString(TEXT("*.[fF][bB][xX]")));
++		TestEqual(TEXT("All files includes extensionless files"), Filters[1].Patterns[0], FString(TEXT("*")));
++		TestEqual(TEXT("Original filter index"), Filters[1].OriginalIndex, 1);
++	}
++	return true;
++}
++#endif
++}
+diff --git a/Engine/Source/Developer/DesktopPlatform/Private/Linux/PortalFileDialog.h b/Engine/Source/Developer/DesktopPlatform/Private/Linux/PortalFileDialog.h
+new file mode 100644
+index 0000000..f0cf7a5
+--- /dev/null
++++ b/Engine/Source/Developer/DesktopPlatform/Private/Linux/PortalFileDialog.h
+@@ -0,0 +1,16 @@
++// Linux desktop-portal integration for the synchronous DesktopPlatform interface.
++#pragma once
++
++#include "CoreMinimal.h"
++
++namespace LinuxPortalFileDialog
++{
++	enum class EType : uint8 { Open, Save, Directory };
++	enum class EResult : uint8 { Unavailable, Cancelled, Accepted, Failed };
++
++	// Only Unavailable permits falling back to Slate. Cancellation and errors after
++	// opening a native dialog must not cause a second picker to appear.
++	EResult Show(EType Type, const void* ParentWindowHandle, const FString& Title,
++		const FString& DefaultPath, const FString& DefaultFile, const FString& FileTypes,
++		uint32 Flags, TArray<FString>& OutFilenames, int32& OutFilterIndex);
++}

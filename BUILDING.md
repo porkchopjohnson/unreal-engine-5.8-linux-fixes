@@ -29,6 +29,22 @@ Keep configuration and compiler flags consistent with the build whose outputs yo
 
 ## Existing builds: inspect scope first
 
+### A module is reported missing, but its library exists
+
+Check the startup log before rebuilding. A line such as:
+
+```text
+Skipping out-of-date modules in manifest '.../UnrealEditor.modules' (BuildId OLD != CURRENT)
+```
+
+means Unreal is rejecting that manifest, not necessarily that the `.so` is absent. In a later local incident, `GPUTextureTransfer` was present but skipped because the editor and many plugin manifests had different build IDs. A subset metadata write had also omitted existing module registrations, including editor-only modules in UAF-related plugins.
+
+The local repair verified the original full-build receipt and the existing libraries, backed up the affected metadata, aligned the known same-engine build cohort, and restored 63 omitted registrations from that receipt. The project then initialized successfully without rebuilding the libraries.
+
+This was a case-specific metadata repair, not a reason to retag arbitrary downloaded plugins. A matching version string and an existing `.so` alone do not establish binary compatibility. If the binaries were built against different headers, engine versions, architectures, or incompatible settings, rebuild them instead. Keep machine-specific manifests and backups out of this patches repository.
+
+Plugin-only builds should reuse the established engine outputs and preserve their metadata identity. For Live Link Hub, use the target-only receipt action described below rather than regenerating a subset of the editor's engine-wide manifests.
+
 UnrealBuildTool can export the planned actions without compiling them:
 
 ```bash
@@ -66,6 +82,10 @@ The temporary rule override is not part of the core patches. The same technique 
 The local Vulkan rebuild completed with seven actions in about 57 seconds. This is an observation, not a timing guarantee.
 
 `-NoEngineChanges` is useful when building project plugins because it refuses changes to existing engine outputs. It will also refuse an intentional rebuild of an existing engine library, so it is not appropriate for the Vulkan replacement itself.
+
+## Native portal file dialogs
+
+For the native KDE-backed file picker, see the separate [portal integration and targeted DesktopPlatform build instructions](PORTAL-FILE-DIALOGS.md#build).
 
 ## Live Link Hub
 

@@ -14,12 +14,22 @@ def patch_paths(patches):
     paths = set()
     for patch in patches:
         for line in patch.read_text(encoding="utf-8").splitlines():
-            if line.startswith("--- a/"):
-                path = PurePosixPath(line[len("--- a/"):])
+            if line.startswith("+++ b/"):
+                path = PurePosixPath(line[len("+++ b/"):])
                 if path.is_absolute() or ".." in path.parts:
                     raise ValueError(f"Unexpected patch path: {path}")
                 paths.add(path.as_posix())
     return sorted(paths)
+
+
+def added_paths(patches):
+    paths = set()
+    for patch in patches:
+        lines = patch.read_text(encoding="utf-8").splitlines()
+        for index, line in enumerate(lines[:-1]):
+            if line == "--- /dev/null" and lines[index + 1].startswith("+++ b/"):
+                paths.add(lines[index + 1][len("+++ b/"):])
+    return paths
 
 
 def apply_series(root, patches, ignore_space_change=False):
@@ -59,6 +69,7 @@ def main():
     repo = Path(__file__).resolve().parents[1]
     patches = sorted((repo / "patches").glob("000*.patch"))
     paths = patch_paths(patches)
+    created = added_paths(patches)
     if not patches or not paths:
         raise RuntimeError("No core patches found")
 
@@ -73,6 +84,10 @@ def main():
         with tempfile.TemporaryDirectory(prefix="ue583-patch-check-") as temporary:
             root = Path(temporary)
             for relative in paths:
+                if relative in created:
+                    if prefix + relative in archive.namelist():
+                        raise RuntimeError(f"Patch expects a new file that already exists in the archive: {relative}")
+                    continue
                 destination = root / relative
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 destination.write_bytes(archive.read(prefix + relative))
