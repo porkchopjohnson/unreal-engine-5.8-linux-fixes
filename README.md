@@ -15,8 +15,12 @@ This repository records the fixes used in a local Fedora/Linux source build. It 
 | Build the standalone Live Link Hub launcher against existing engine modules | `LiveLinkHubLauncher.Build.cs` | Built and started successfully through XWayland. Capture-device workflows require separate testing. |
 | Consistent editor and Hub launch settings | Shell launchers | XWayland startup verified. Editor launcher supports both the project browser and explicit project paths. |
 | KDE-backed native file chooser | `DesktopPlatformLinux.cpp` and new `PortalFileDialog` files | Built; actual Import, Save/directory diagnostics, cancellation, and URI/filter parsing tests passed. |
+| Hash-based Vulkan deferred-deletion validation | `VulkanMemory.cpp` | Built; duplicate-delete assertion retained. Controlled PhAT comparison measured about 135 ms versus 33 ms editor tick intervals with the old scan enabled versus hash-only validation. |
+| Correct X11 popup synchronization coordinates | Bundled SDL3 `SDL_x11window.c` | Built; repeated popup operations fell from about 103 ms to below 1 ms in the regression probe. User confirmed asset-dropdown scrolling is smooth. |
 
 The optional custom-plugin patch records the 5.8 migration of `ClothVertexColorTools` and `PoseAssetOffsetTools`. It is not needed for the engine fixes.
+
+The optional [Physics Asset Transfer Tools plugin](plugins/PhysicsAssetTransferTools/README.md) is included as source. It adds a PhAT button to copy a complete physics setup to another mesh and snap the constraints to the destination reference pose, with Undo/Redo. Both automation tests passed and the user confirmed it works in their workflow.
 
 ## What was already in the 5.8.3 source
 
@@ -58,12 +62,16 @@ The patches are ordered:
 3. Vulkan swapchain cleanup.
 4. Live Link Hub launcher build setting.
 5. Desktop-portal Open, Save, and directory pickers.
+6. Hash-based Vulkan deferred-deletion validation, with comparison/benchmark commands.
+7. SDL X11 popup synchronization coordinate correction.
 
 They have been checked against the original `UnrealEngine-5.8.3-release.zip` used for this build. If `git apply --check` reports a conflict, inspect the source differences before applying. Do not apply them a second time to an already patched tree.
 
 ## Build and launch
 
 See [BUILDING.md](BUILDING.md) for initial builds, incremental build scope, and Live Link Hub's target receipt.
+
+**Patch 0007 changes bundled SDL source:** rebuild SDL and relink ApplicationCore for it to take effect. Applying the patch or rebuilding an unrelated engine module does not replace SDL code already linked into ApplicationCore. See [ASSET-PICKER-SCROLLING.md](ASSET-PICKER-SCROLLING.md#build-and-install).
 
 Open the editor's project browser:
 
@@ -145,8 +153,22 @@ Releasing unused swapchain recreation resources for window ...
 5. Open File/Edit menus, dismiss them with an outside click, and test submenus, arrow keys, and Escape.
 6. Test dialogs relevant to your workflow.
 7. Repeatedly drag meshes into a level and open/cancel dialogs, watching for the swapchain assertion.
+8. Scroll an asset-property dropdown repeatedly with its tooltips enabled; check the SDL [popup regression probe](ASSET-PICKER-SCROLLING.md#regression-probe).
+9. For PhAT lag, use the controlled [Vulkan validation comparison](VULKAN-PHAT-PERFORMANCE.md), keeping selection, visuals, camera and foreground state fixed.
 
 `Slate.TestNotification` is a local diagnostic added by patch 0002, not a stock UE 5.8.3 command.
+
+## Physics Asset Editor performance
+
+The linear Debug/Development duplicate-delete scan could traverse tens of thousands of pending entries for every resource enqueue. Patch 0006 retains the protection using a per-queue hash index without changing resource lifetimes or private device layouts. A same-process A/B/B/A run reproduced the slowdown when the scan was restored. The hash-only run reached a 30-Hz plateau whose limiter was not identified; this is not an uncapped GPU benchmark.
+
+See [VULKAN-PHAT-PERFORMANCE.md](VULKAN-PHAT-PERFORMANCE.md) for the implementation invariants, measurements, commands and limitations.
+
+## Asset/object dropdown scrolling
+
+Patch 0007 corrects a coordinate-space mismatch in SDL's X11 window synchronization. Popup positions are parent-relative, while the expected native positions are global. Comparing them directly caused completed moves to wait through the approximately 100 ms timeout. The fix retains synchronization and its timeout, and preserves parent-relative SDL move events.
+
+See [ASSET-PICKER-SCROLLING.md](ASSET-PICKER-SCROLLING.md) for diagnosis, regression measurements and the SDL/ApplicationCore build procedure.
 
 ## Verify patches against an archive
 

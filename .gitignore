@@ -2,3 +2,8 @@ __pycache__/
 *.pyc
 *.log
 .DS_Store
+
+# Source-only Unreal plugins; build artifacts and local metadata stay out of Git.
+plugins/**/Binaries/
+plugins/**/Intermediate/
+plugins/**/Saved/

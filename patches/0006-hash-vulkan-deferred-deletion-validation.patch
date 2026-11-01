@@ -1,0 +1,246 @@
+--- a/Engine/Source/Runtime/VulkanRHI/Private/VulkanMemory.cpp
++++ b/Engine/Source/Runtime/VulkanRHI/Private/VulkanMemory.cpp
+@@ -4621,14 +4621,162 @@
+ 		ProcessPendingFreeNoLock(bImmediately, bFreeToOS);
+ 	}
+ 
++#if (UE_BUILD_DEBUG || UE_BUILD_DEVELOPMENT)
++	namespace
++	{
++		struct FDeferredDeletionKey
++		{
++			FDeferredDeletionQueue2::EType Type;
++			uint64 Handle;
++
++			bool operator==(const FDeferredDeletionKey& Other) const
++			{
++				return Type == Other.Type && Handle == Other.Handle;
++			}
++
++			friend uint32 GetTypeHash(const FDeferredDeletionKey& Key)
++			{
++				return HashCombineFast(::GetTypeHash(static_cast<uint32>(Key.Type)), ::GetTypeHash(Key.Handle));
++			}
++		};
++
++		// Keep private device/queue layouts compatible with precompiled consumers. The
++		// queue's CS is always acquired before this lock; never hold it during deletion
++		// callbacks. Separate keys per queue also cover multiple Vulkan devices.
++		FCriticalSection GDeferredDeletionIndexCS;
++		TMap<const FDeferredDeletionQueue2*, TMap<FDeferredDeletionKey, uint32>> GDeferredDeletionIndices;
++
++		bool AddDeferredDeletionKey(const FDeferredDeletionQueue2* Queue, FDeferredDeletionQueue2::EType Type, uint64 Handle)
++		{
++			FScopeLock Lock(&GDeferredDeletionIndexCS);
++			uint32& Count = GDeferredDeletionIndices.FindChecked(Queue).FindOrAdd({ Type, Handle });
++			return Count++ != 0;
++		}
++
++		void RemoveDeferredDeletionKey(const FDeferredDeletionQueue2* Queue, FDeferredDeletionQueue2::EType Type, uint64 Handle)
++		{
++			FScopeLock Lock(&GDeferredDeletionIndexCS);
++			auto& Index = GDeferredDeletionIndices.FindChecked(Queue);
++			const FDeferredDeletionKey Key{ Type, Handle };
++			uint32& Count = Index.FindChecked(Key);
++			if (--Count == 0)
++			{
++				Index.Remove(Key);
++			}
++		}
++
++		void ResetDeferredDeletionIndex(const FDeferredDeletionQueue2* Queue)
++		{
++			FScopeLock Lock(&GDeferredDeletionIndexCS);
++			GDeferredDeletionIndices.FindChecked(Queue).Reset();
++		}
++
++		TAutoConsoleVariable<int32> CVarDeferredDeletionLinearValidation(
++			TEXT("r.Vulkan.DeferredDeletionQueue.LinearValidation"), 0,
++			TEXT("Also run the original linear duplicate check, verifying the hash index. Development profiling only."));
++	}
++#endif
++
+ 	FDeferredDeletionQueue2::FDeferredDeletionQueue2(FVulkanDevice& InDevice)
+ 		: Device(InDevice)
+ 	{
++#if (UE_BUILD_DEBUG || UE_BUILD_DEVELOPMENT)
++		FScopeLock Lock(&GDeferredDeletionIndexCS);
++		check(!GDeferredDeletionIndices.Contains(this));
++		GDeferredDeletionIndices.Add(this);
++		static FAutoConsoleCommand BenchmarkCommand(
++			TEXT("Vulkan.DeletionQueue.Benchmark"),
++			TEXT("Benchmark duplicate validation on synthetic entries; creates/deletes no Vulkan resources."),
++			FConsoleCommandDelegate::CreateLambda([]()
++			{
++				TArray<FEntry> TestEntries;
++				// Opaque registry identity only, never dereferenced as a queue.
++				const auto* TestQueue = reinterpret_cast<const FDeferredDeletionQueue2*>(&TestEntries);
++				{
++					FScopeLock IndexLock(&GDeferredDeletionIndexCS);
++					GDeferredDeletionIndices.Add(TestQueue);
++				}
++				check(!AddDeferredDeletionKey(TestQueue, EType::Buffer, 7));
++				check(!AddDeferredDeletionKey(TestQueue, EType::Image, 7));
++				check(AddDeferredDeletionKey(TestQueue, EType::Buffer, 7));
++				RemoveDeferredDeletionKey(TestQueue, EType::Buffer, 7);
++				RemoveDeferredDeletionKey(TestQueue, EType::Buffer, 7);
++				check(!AddDeferredDeletionKey(TestQueue, EType::Buffer, 7));
++				check(!AddDeferredDeletionKey(TestQueue, EType::Func, 0));
++				check(AddDeferredDeletionKey(TestQueue, EType::Func, 0));
++				RemoveDeferredDeletionKey(TestQueue, EType::Func, 0);
++				check(AddDeferredDeletionKey(TestQueue, EType::Func, 0));
++				ResetDeferredDeletionIndex(TestQueue);
++				check(!AddDeferredDeletionKey(TestQueue, EType::Func, 0));
++				ResetDeferredDeletionIndex(TestQueue);
++
++				FCriticalSection TestCS;
++				for (int32 QueueSize : { 10016, 21692 })
++				{
++					for (int32 Trial = 0; Trial < 5; ++Trial)
++					{
++						for (bool bHash : { false, true })
++						{
++							TestEntries.Reset();
++							TestEntries.Reserve(QueueSize + 1);
++							ResetDeferredDeletionIndex(TestQueue);
++							for (int32 Index = 0; Index < QueueSize; ++Index)
++							{
++								FEntry Entry;
++								Entry.StructureType = EType::BufferView;
++								Entry.Handle = Index + 1;
++								TestEntries.Add(Entry);
++								if (bHash) { AddDeferredDeletionKey(TestQueue, Entry.StructureType, Entry.Handle); }
++							}
++							const double Start = FPlatformTime::Seconds();
++							constexpr int32 Iterations = 10000;
++							for (int32 Index = 0; Index < Iterations; ++Index)
++							{
++								FScopeLock QueueLock(&TestCS);
++								FEntry Entry;
++								Entry.StructureType = EType::BufferView;
++								Entry.Handle = uint64(QueueSize) + Index + 1;
++								const bool bDuplicate = bHash ? AddDeferredDeletionKey(TestQueue, Entry.StructureType, Entry.Handle) :
++									TestEntries.ContainsByPredicate([&](const FEntry& Other)
++									{
++										return Other.Handle == Entry.Handle && Other.StructureType == Entry.StructureType;
++									});
++								check(!bDuplicate);
++								TestEntries.Add(Entry);
++								const FEntry& Old = TestEntries[0];
++								if (bHash) { RemoveDeferredDeletionKey(TestQueue, Old.StructureType, Old.Handle); }
++								TestEntries.RemoveAtSwap(0, EAllowShrinking::No);
++							}
++							UE_LOG(LogVulkanRHI, Display, TEXT("DeletionLookupBenchmark entries=%d entry_bytes=%d trial=%d mode=%s operations=%d elapsed_ms=%.3f"),
++								QueueSize, int32(sizeof(FEntry)), Trial, bHash ? TEXT("hash") : TEXT("linear"), Iterations, (FPlatformTime::Seconds() - Start) * 1000.0);
++						}
++						// Reverse traversal and whole-array transfer mirror both deferred drains.
++						for (int32 Index = TestEntries.Num() - 1; Index >= 0; --Index)
++						{
++							RemoveDeferredDeletionKey(TestQueue, TestEntries[Index].StructureType, TestEntries[Index].Handle);
++							TestEntries.RemoveAtSwap(Index, EAllowShrinking::No);
++						}
++					}
++				}
++				{
++					FScopeLock IndexLock(&GDeferredDeletionIndexCS);
++					check(GDeferredDeletionIndices.FindChecked(TestQueue).Num() == 0);
++					GDeferredDeletionIndices.Remove(TestQueue);
++				}
++				UE_LOG(LogVulkanRHI, Display, TEXT("DeletionLookupBenchmark safety checks passed"));
++			}));
++#endif
+ 	}
+ 
+ 	FDeferredDeletionQueue2::~FDeferredDeletionQueue2()
+ 	{
+ 		checkf(Entries.Num() == 0, TEXT("There are %d entries remaining in the Deferred Deletion Queue!"), Entries.Num());
++#if (UE_BUILD_DEBUG || UE_BUILD_DEVELOPMENT)
++		FScopeLock ScopeLock(&CS);
++		FScopeLock Lock(&GDeferredDeletionIndexCS);
++		check(GDeferredDeletionIndices.FindChecked(this).Num() == 0);
++		GDeferredDeletionIndices.Remove(this);
++#endif
+ 	}
+ 
+ 	void FDeferredDeletionQueue2::EnqueueGenericResource(EType Type, uint64 Handle)
+@@ -4641,11 +4789,16 @@
+ 			FScopeLock ScopeLock(&CS);
+ 
+ #if (UE_BUILD_DEBUG || UE_BUILD_DEVELOPMENT)
+-			FEntry* ExistingEntry = Entries.FindByPredicate([&](const FEntry& InEntry)
++			const bool bAlreadyQueued = AddDeferredDeletionKey(this, Type, Handle);
++			if (CVarDeferredDeletionLinearValidation.GetValueOnAnyThread() != 0)
++			{
++				const bool bFoundByScan = Entries.ContainsByPredicate([&](const FEntry& InEntry)
+ 				{
+ 					return (InEntry.Handle == Entry.Handle) && (InEntry.StructureType == Entry.StructureType);
+ 				});
+-			checkf(ExistingEntry == nullptr, TEXT("Attempt to double-delete resource, FDeferredDeletionQueue2::EType: %d, Handle: %llu"), (int32)Type, Handle);
++				checkf(bFoundByScan == bAlreadyQueued, TEXT("Deferred deletion hash index disagrees with Entries"));
++			}
++			checkf(!bAlreadyQueued, TEXT("Attempt to double-delete resource, FDeferredDeletionQueue2::EType: %d, Handle: %llu"), (int32)Type, Handle);
+ #endif
+ 
+ 			Entries.Add(Entry);
+@@ -4660,6 +4813,9 @@
+ 		Entry.Func = new TUniqueFunction<void(FVulkanDevice&)>(MoveTemp(Func));
+ 		{
+ 			FScopeLock ScopeLock(&CS);
++#if (UE_BUILD_DEBUG || UE_BUILD_DEVELOPMENT)
++			AddDeferredDeletionKey(this, Entry.StructureType, Entry.Handle);
++#endif
+ 			Entries.Add(Entry);
+ 		}
+ 	}
+@@ -4674,6 +4830,9 @@
+ 		Entry.DeviceMemoryAllocation = DeviceMemoryAllocation;
+ 		{
+ 			FScopeLock ScopeLock(&CS);
++#if (UE_BUILD_DEBUG || UE_BUILD_DEVELOPMENT)
++			AddDeferredDeletionKey(this, Entry.StructureType, Entry.Handle);
++#endif
+ 			Entries.Add(Entry);
+ 		}
+ 	}
+@@ -4692,6 +4851,9 @@
+ 		Entry.Allocation = Allocation;
+ 		{
+ 			FScopeLock ScopeLock(&CS);
++#if (UE_BUILD_DEBUG || UE_BUILD_DEVELOPMENT)
++			AddDeferredDeletionKey(this, Entry.StructureType, Entry.Handle);
++#endif
+ 			Entries.Add(Entry);
+ 		}
+ 		check(!Allocation.HasAllocation());
+@@ -4709,6 +4871,9 @@
+ 			FScopeLock ScopeLock(&CS);
+ 			ReleaseResourcesImmediately(Entries);
+ 			Entries.Reset();
++#if (UE_BUILD_DEBUG || UE_BUILD_DEVELOPMENT)
++			ResetDeferredDeletionIndex(this);
++#endif
+ 		}
+ 		else
+ 		{
+@@ -4724,6 +4889,11 @@
+ 						if (GVulkanRHIDeletionFrameNumber > Entry.FrameNumber + GVulkanNumFramesToWaitForResourceDelete)
+ 						{
+ 							TempEntries.Add(Entry);
++#if (UE_BUILD_DEBUG || UE_BUILD_DEVELOPMENT)
++							// Match the original check's scope: entries cease to be tracked
++							// when removed, not when the end-of-pipe task destroys them.
++							RemoveDeferredDeletionKey(this, Entry.StructureType, Entry.Handle);
++#endif
+ 							Entries.RemoveAtSwap(Index, EAllowShrinking::No);
+ 						}
+ 					}
+@@ -4731,6 +4901,9 @@
+ 				else
+ 				{
+ 					TempEntries = MoveTemp(Entries);
++#if (UE_BUILD_DEBUG || UE_BUILD_DEVELOPMENT)
++					ResetDeferredDeletionIndex(this);
++#endif
+ 				}
+ 			}
+ 

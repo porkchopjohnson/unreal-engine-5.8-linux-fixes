@@ -1,0 +1,78 @@
+--- a/Engine/Source/ThirdParty/SDL3/SDL-gui-backend/src/video/x11/SDL_x11window.c
++++ b/Engine/Source/ThirdParty/SDL3/SDL-gui-backend/src/video/x11/SDL_x11window.c
+@@ -971,6 +971,7 @@
+     XWindowAttributes attrs;
+     Uint64 timeout = 0;
+     int x, y;
++    int global_x, global_y;
+     const bool send_move = !!(data->pending_operation & X11_PENDING_OP_MOVE);
+     const bool send_resize = !!(data->pending_operation & X11_PENDING_OP_RESIZE);
+ 
+@@ -987,11 +988,11 @@
+         X11_XSync(display, False);
+         X11_XGetWindowAttributes(display, data->xwindow, &attrs);
+         X11_XTranslateCoordinates(display, parent, DefaultRootWindow(display),
+-                                  attrs.x, attrs.y, &x, &y, &childReturn);
+-        SDL_GlobalToRelativeForWindow(window, x, y, &x, &y);
++                                  attrs.x, attrs.y, &global_x, &global_y, &childReturn);
+ 
+         if (!caught_x11_error) {
+-            if ((data->pending_operation & X11_PENDING_OP_MOVE) && (x == data->expected.x + data->border_left && y == data->expected.y + data->border_top)) {
++            // Local fix: expected is in root coordinates, even for parent-relative popups.
++            if ((data->pending_operation & X11_PENDING_OP_MOVE) && (global_x == data->expected.x + data->border_left && global_y == data->expected.y + data->border_top)) {
+                 data->pending_operation &= ~X11_PENDING_OP_MOVE;
+             }
+             if ((data->pending_operation & X11_PENDING_OP_RESIZE) && (attrs.width == data->expected.w && attrs.height == data->expected.h)) {
+@@ -1006,8 +1007,8 @@
+         if (SDL_GetTicksNS() >= timeout) {
+             // Timed out without the expected values. Update the requested data so future sync calls won't block.
+             data->pending_operation &= ~(X11_PENDING_OP_MOVE | X11_PENDING_OP_RESIZE);
+-            data->expected.x = x;
+-            data->expected.y = y;
++            data->expected.x = global_x - data->border_left;
++            data->expected.y = global_y - data->border_top;
+             data->expected.w = attrs.width;
+             data->expected.h = attrs.height;
+             break;
+@@ -1017,6 +1018,7 @@
+     }
+ 
+     if (!caught_x11_error) {
++        SDL_GlobalToRelativeForWindow(window, global_x, global_y, &x, &y);
+         if (send_move) {
+             SDL_SendWindowEvent(window, SDL_EVENT_WINDOW_MOVED, x, y);
+         }
+@@ -1051,7 +1053,12 @@
+         X11_XSync(display, False);
+         X11_PumpEvents(_this);
+ 
+-        if ((data->pending_operation & X11_PENDING_OP_MOVE) && (window->x == data->expected.x + data->border_left && window->y == data->expected.y + data->border_top)) {
++        // Local fix: SDL popup positions are parent-relative, while X11_UpdateWindowPosition
++        // stores expected positions in root coordinates. Comparing the two directly makes
++        // completed popup moves wait for the full synchronization timeout.
++        int global_x, global_y;
++        SDL_RelativeToGlobalForWindow(window, window->x, window->y, &global_x, &global_y);
++        if ((data->pending_operation & X11_PENDING_OP_MOVE) && (global_x == data->expected.x + data->border_left && global_y == data->expected.y + data->border_top)) {
+             data->pending_operation &= ~X11_PENDING_OP_MOVE;
+         }
+         if ((data->pending_operation & X11_PENDING_OP_RESIZE) && (window->w == data->expected.w && window->h == data->expected.h)) {
+@@ -1060,7 +1067,7 @@
+ 
+         if (data->pending_operation == X11_PENDING_OP_NONE) {
+             if (force_exit ||
+-                (window->x == data->expected.x + data->border_left && window->y == data->expected.y + data->border_top &&
++                (global_x == data->expected.x + data->border_left && global_y == data->expected.y + data->border_top &&
+                  window->w == data->expected.w && window->h == data->expected.h)) {
+                 // The window is in the expected state and nothing is pending. Done.
+                 break;
+@@ -1074,8 +1081,8 @@
+ 
+         if (SDL_GetTicksNS() >= timeout) {
+             // Timed out without the expected values. Update the requested data so future sync calls won't block.
+-            data->expected.x = window->x;
+-            data->expected.y = window->y;
++            data->expected.x = global_x - data->border_left;
++            data->expected.y = global_y - data->border_top;
+             data->expected.w = window->w;
+             data->expected.h = window->h;
+ 

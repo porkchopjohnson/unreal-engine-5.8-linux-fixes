@@ -87,6 +87,20 @@ The local Vulkan rebuild completed with seven actions in about 57 seconds. This 
 
 For the native KDE-backed file picker, see the separate [portal integration and targeted DesktopPlatform build instructions](PORTAL-FILE-DIALOGS.md#build).
 
+## Physics Asset Editor performance
+
+Patch 0006 changes only VulkanRHI. Use the module-only workflow above, preserving the established debug-info settings. See [VULKAN-PHAT-PERFORMANCE.md](VULKAN-PHAT-PERFORMANCE.md) for the validation comparison and benchmark commands. No PhysicsAssetEditor rebuild is needed for this backend optimization.
+
+## Asset-picker scrolling and bundled SDL
+
+Patch 0007 changes SDL source, not a UBT-compiled engine source file. Rebuild the affected SDL archive first, verify it with the included standalone regression probe, then rebuild only ApplicationCore. See [ASSET-PICKER-SCROLLING.md](ASSET-PICKER-SCROLLING.md#build-and-install) for the scoped build, the temporary FreeType PNG/zlib link-input workaround, and the difference between a complete SDL source build and the audited one-object local archive update.
+
+Applying the source patch without replacing the SDL archive and relinking ApplicationCore leaves the old behavior installed. The local engine rebuild remained limited to one ApplicationCore compile and one link.
+
+## Physics Asset Transfer Tools plugin
+
+The optional [plugin source](plugins/PhysicsAssetTransferTools/README.md) is included in this repository. Install it into a project or engine plugin directory and preview `-UsePrecompiled -Module=PhysicsAssetTransferTools` before building. The verified local plan was one plugin compile and one link. Its source-only descriptor, build rules, usage instructions and two automation tests are provided; no compiled plugin libraries or generated metadata are included.
+
 ## Live Link Hub
 
 Patch 0004 allows the new Hub launcher to compile while reusing the shared editor modules:
