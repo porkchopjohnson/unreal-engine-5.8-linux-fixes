@@ -1,0 +1,19 @@
+{
+	"FileVersion": 3,
+	"Version": 2,
+	"VersionName": "1.1",
+	"FriendlyName": "MetaHuman Video Importer",
+	"Description": "Import videos into project-local footage and configured monocular MetaHuman Performance assets on Linux.",
+	"Category": "MetaHuman",
+	"EnabledByDefault": false,
+	"CanContainContent": false,
+	"SupportedTargetPlatforms": [ "Linux" ],
+	"Modules": [
+		{ "Name": "MetaHumanVideoImporter", "Type": "Editor", "LoadingPhase": "PostEngineInit", "PlatformAllowList": [ "Linux" ] }
+	],
+	"Plugins": [
+		{ "Name": "MetaHuman", "Enabled": true },
+		{ "Name": "CaptureData", "Enabled": true },
+		{ "Name": "ImgMedia", "Enabled": true }
+	]
+}
