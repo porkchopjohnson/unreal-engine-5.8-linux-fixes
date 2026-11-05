@@ -7,3 +7,8 @@ __pycache__/
 plugins/**/Binaries/
 plugins/**/Intermediate/
 plugins/**/Saved/
+
+# Optional source overlays use the same generated-output layout after local setup.
+integrations/**/Binaries/
+integrations/**/Intermediate/
+integrations/**/Saved/

@@ -1,0 +1,16 @@
+diff --git a/Engine/Source/Runtime/NNE/Private/NNEModelData.cpp b/Engine/Source/Runtime/NNE/Private/NNEModelData.cpp
+--- a/Engine/Source/Runtime/NNE/Private/NNEModelData.cpp
++++ b/Engine/Source/Runtime/NNE/Private/NNEModelData.cpp
+@@ -474,5 +474,11 @@
+ TConstArrayView64<uint8> UNNEModelData::GetAdditionalFileData(const FString& Key) const
+ {
+-	return AdditionalFileData.Contains(Key) ? AdditionalFileData[Key] : TConstArrayView<uint8>();
++	// Keep both branches 64-bit: a 32-bit empty view in the conditional narrows
++	// the stored array before returning, asserting on external weights over 2 GiB.
++	if (const TArray64<uint8>* Data = AdditionalFileData.Find(Key))
++	{
++		return TConstArrayView64<uint8>(*Data);
++	}
++	return TConstArrayView64<uint8>();
+ }
+ 

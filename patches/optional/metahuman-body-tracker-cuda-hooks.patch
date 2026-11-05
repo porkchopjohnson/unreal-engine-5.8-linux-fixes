@@ -1,0 +1,45 @@
+diff --git a/Source/BodyTracker/Private/NNEUtils.cpp b/Source/BodyTracker/Private/NNEUtils.cpp
+--- a/Source/BodyTracker/Private/NNEUtils.cpp
++++ b/Source/BodyTracker/Private/NNEUtils.cpp
+@@ -3,3 +3,4 @@
+ #include "NNEUtils.h"
++#include "CudaInference.h"
+ 
+ #include "NNE.h"
+@@ -143,6 +144,14 @@
+ 		UE::BodyTracker::EDeviceType DeviceType,
+ 		UNNEModelData* ModelData)
+ 	{
++		// Preserve CPU-only requests (notably HueFinalStep); accelerate GPU preferences on Linux.
++#if PLATFORM_LINUX && WITH_EDITOR
++		if (DeviceType == UE::BodyTracker::EDeviceType::GPU && RuntimeName == TEXT("NNERuntimeORTDml") &&
++			ModelData && ModelData->GetPathName().StartsWith(TEXT("/MetaHumanBodyTracker/Models/Offline/")))
++		{
++			if (auto CUDA = UE::MetaHuman::Cuda::CreateInstance(ModelData)) return CUDA;
++		}
++#endif
+ 		switch (DeviceType)
+ 		{
+ 		case UE::BodyTracker::EDeviceType::CPU:
+diff --git a/Source/Segmentation/Private/NNEUtils.cpp b/Source/Segmentation/Private/NNEUtils.cpp
+--- a/Source/Segmentation/Private/NNEUtils.cpp
++++ b/Source/Segmentation/Private/NNEUtils.cpp
+@@ -3,3 +3,4 @@
+ #include "NNEUtils.h"
++#include "CudaInference.h"
+ 
+ #include "NNE.h"
+@@ -76,6 +77,13 @@
+ 	EDeviceType DeviceType,
+ 	UNNEModelData* ModelData)
+ {
++	// DirectML is unavailable on Linux; satisfy the GPU preference with CUDA first.
++#if PLATFORM_LINUX && WITH_EDITOR
++	if (DeviceType == EDeviceType::GPU && RuntimeName == TEXT("NNERuntimeORTDml"))
++	{
++		if (auto CUDA = UE::MetaHuman::Cuda::CreateInstance(ModelData)) return CUDA;
++	}
++#endif
+ 	switch (DeviceType)
+ 	{
+ 	case EDeviceType::CPU:

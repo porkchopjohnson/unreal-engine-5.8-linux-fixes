@@ -22,6 +22,8 @@ The optional custom-plugin patch records the 5.8 migration of `ClothVertexColorT
 
 The optional [Physics Asset Transfer Tools plugin](plugins/PhysicsAssetTransferTools/README.md) is included as source. It adds a PhAT button to copy a complete physics setup to another mesh and snap the constraints to the destination reference pose, with Undo/Redo. Both automation tests passed and the user confirmed it works in their workflow.
 
+The optional [MetaHuman offline body-tracking CUDA integration](METAHUMAN-BODY-TRACKER-CUDA.md) adds GPU inference on Linux using an isolated ONNX Runtime worker. It includes a source overlay, engine/plugin patches, pinned dependency setup, and validation tools. RTX 3090 model comparisons and a five-stage real-footage solve passed; the user also confirmed that processing the full clip works very well. See the guide for installation, measurements, and CPU/CUDA controls.
+
 ## What was already in the 5.8.3 source
 
 The source archive used as the baseline already contained:
