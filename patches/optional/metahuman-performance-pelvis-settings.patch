@@ -1,0 +1,196 @@
+diff --git a/Engine/Plugins/MetaHuman/MetaHumanAnimator/Source/MetaHumanPerformance/Private/Customizations/MetaHumanPerformanceCustomizations.cpp b/Engine/Plugins/MetaHuman/MetaHumanAnimator/Source/MetaHumanPerformance/Private/Customizations/MetaHumanPerformanceCustomizations.cpp
+index 8025cfa..dd84759 100644
+--- a/Engine/Plugins/MetaHuman/MetaHumanAnimator/Source/MetaHumanPerformance/Private/Customizations/MetaHumanPerformanceCustomizations.cpp
++++ b/Engine/Plugins/MetaHuman/MetaHumanAnimator/Source/MetaHumanPerformance/Private/Customizations/MetaHumanPerformanceCustomizations.cpp
+@@ -390,6 +390,24 @@ void FMetaHumanPerformanceCustomization::CustomizeDetails(IDetailLayoutBuilder&
+ 
+ 	InDetailBuilder.HideProperty(FaceTrackingProperty);
+ 	InDetailBuilder.HideProperty(BodyTrackingProperty);
++	// These rows are explicitly placed under Body Tracking below, never at the
++	// top level or in face/audio-only Performance details.
++	const FName PelvisProperties[] = {
++		GET_MEMBER_NAME_CHECKED(UMetaHumanPerformance, bEnablePelvisRefinement),
++		GET_MEMBER_NAME_CHECKED(UMetaHumanPerformance, PelvisPitchStrength),
++		GET_MEMBER_NAME_CHECKED(UMetaHumanPerformance, PelvisRollStrength),
++		GET_MEMBER_NAME_CHECKED(UMetaHumanPerformance, PelvisTwistStrength),
++		GET_MEMBER_NAME_CHECKED(UMetaHumanPerformance, PelvisEasingStrength),
++		GET_MEMBER_NAME_CHECKED(UMetaHumanPerformance, bPelvisImageTracking),
++		GET_MEMBER_NAME_CHECKED(UMetaHumanPerformance, PelvisTiltStrength),
++		GET_MEMBER_NAME_CHECKED(UMetaHumanPerformance, PelvisImageWeight),
++		GET_MEMBER_NAME_CHECKED(UMetaHumanPerformance, PelvisExaggeration),
++		GET_MEMBER_NAME_CHECKED(UMetaHumanPerformance, PelvisMaxTilt),
++		GET_MEMBER_NAME_CHECKED(UMetaHumanPerformance, PelvisMaxTwist),
++		GET_MEMBER_NAME_CHECKED(UMetaHumanPerformance, bPelvisDumpDiagnostics),
++		GET_MEMBER_NAME_CHECKED(UMetaHumanPerformance, bUsePelvisConsoleSettings)
++	};
++	for (FName Name : PelvisProperties) { InDetailBuilder.HideProperty(Name); }
+ 
+ 	if (Performance->InputType == EDataInputType::MonoFootage)
+ 	{
+@@ -527,6 +545,19 @@ void FMetaHumanPerformanceCustomization::CustomizeDetails(IDetailLayoutBuilder&
+ 			BodyTrackingGroup.AddPropertyRow(
+ 				InDetailBuilder.GetProperty(GET_MEMBER_NAME_CHECKED(UMetaHumanPerformance, bEnableFootLocking)));
+ 
++			IDetailGroup& PelvisGroup = BodyTrackingGroup.AddGroup(
++				TEXT("PelvisRefinement"), LOCTEXT("PelvisRefinement", "Pelvis Refinement"), true);
++			for (int32 Index = 0; Index < 6; ++Index)
++			{
++				PelvisGroup.AddPropertyRow(InDetailBuilder.GetProperty(PelvisProperties[Index]));
++			}
++			IDetailGroup& PelvisAdvancedGroup = PelvisGroup.AddGroup(
++				TEXT("PelvisAdvanced"), LOCTEXT("PelvisAdvanced", "Advanced"), false);
++			for (int32 Index = 6; Index < UE_ARRAY_COUNT(PelvisProperties); ++Index)
++			{
++				PelvisAdvancedGroup.AddPropertyRow(InDetailBuilder.GetProperty(PelvisProperties[Index]));
++			}
++
+ 			IDetailGroup& BodyAdvancedGroup = BodyTrackingGroup.AddGroup(
+ 				TEXT("Advanced"), LOCTEXT("Advanced", "Advanced"), false);
+ 
+diff --git a/Engine/Plugins/MetaHuman/MetaHumanAnimator/Source/MetaHumanPerformance/Private/Tests/MetaHumanPerformanceTests.cpp b/Engine/Plugins/MetaHuman/MetaHumanAnimator/Source/MetaHumanPerformance/Private/Tests/MetaHumanPerformanceTests.cpp
+index 0289f4a..c77f0a7 100644
+--- a/Engine/Plugins/MetaHuman/MetaHumanAnimator/Source/MetaHumanPerformance/Private/Tests/MetaHumanPerformanceTests.cpp
++++ b/Engine/Plugins/MetaHuman/MetaHumanAnimator/Source/MetaHumanPerformance/Private/Tests/MetaHumanPerformanceTests.cpp
+@@ -18,11 +18,59 @@
+ #include "Runtime/Engine/Classes/Animation/Skeleton.h"
+ #include "Runtime/Engine/Classes/Animation/AnimSequence.h"
+ #include "Animation/IAnimationSequenceCompiler.h"
++#include "PropertyEditorModule.h"
++#include "IDetailsView.h"
++#include "PropertyPath.h"
+ 
+ 
+ // The threshold is selected to address a hardware related difference
+ float UContourDataComparisonHelper::ContourComparisonTolerance = 2.4f;
+ 
++#if WITH_DEV_AUTOMATION_TESTS
++IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMetaHumanPelvisDetailsTest, "MetaHuman.Performance.PelvisSettingsDetails",
++	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
++bool FMetaHumanPelvisDetailsTest::RunTest(const FString&)
++{
++	TStrongObjectPtr<UMetaHumanPerformance> Performance(NewObject<UMetaHumanPerformance>());
++	Performance->InputType = EDataInputType::MonoFootage;
++	Performance->bBodyTracking = true;
++	FPropertyEditorModule& PropertyEditor = FModuleManager::LoadModuleChecked<FPropertyEditorModule>("PropertyEditor");
++	FDetailsViewArgs Args;
++	Args.bUpdatesFromSelection = false;
++	const auto Details = PropertyEditor.CreateDetailView(Args);
++	Details->SetObject(Performance.Get());
++	auto CountProperty = [&](FName Name)
++	{
++		int32 Count = 0;
++		for (const FPropertyPath& Path : Details->GetPropertiesInOrderDisplayed())
++		{
++			if (Path.IsValid() && Path.GetLeafMostProperty().Property->GetFName() == Name) { ++Count; }
++		}
++		return Count;
++	};
++	const FName Names[] = {
++		GET_MEMBER_NAME_CHECKED(UMetaHumanPerformance, bEnablePelvisRefinement),
++		GET_MEMBER_NAME_CHECKED(UMetaHumanPerformance, PelvisPitchStrength),
++		GET_MEMBER_NAME_CHECKED(UMetaHumanPerformance, PelvisRollStrength),
++		GET_MEMBER_NAME_CHECKED(UMetaHumanPerformance, PelvisTwistStrength),
++		GET_MEMBER_NAME_CHECKED(UMetaHumanPerformance, PelvisEasingStrength),
++		GET_MEMBER_NAME_CHECKED(UMetaHumanPerformance, bPelvisImageTracking),
++		GET_MEMBER_NAME_CHECKED(UMetaHumanPerformance, PelvisExaggeration),
++		GET_MEMBER_NAME_CHECKED(UMetaHumanPerformance, bUsePelvisConsoleSettings)
++	};
++	for (FName Name : Names)
++	{
++		TestEqual(FString::Printf(TEXT("Body tracking details display %s exactly once"), *Name.ToString()), CountProperty(Name), 1);
++		const FProperty* Property = FindFProperty<FProperty>(UMetaHumanPerformance::StaticClass(), Name);
++		TestTrue(TEXT("Control is editable and saved, not transient"), Property && Property->HasAnyPropertyFlags(CPF_Edit) && !Property->HasAnyPropertyFlags(CPF_Transient));
++	}
++	Performance->InputType = EDataInputType::Audio;
++	Details->ForceRefresh();
++	for (FName Name : Names) { TestEqual(TEXT("Pelvis controls are absent from audio details"), CountProperty(Name), 0); }
++	return true;
++}
++#endif
++
+ bool UContourDataComparisonHelper::ComparePerformanceContourData(const UMetaHumanPerformance* InOriginal, const UMetaHumanPerformance* InNew)
+ {
+ 	bool bMatch = true;
+@@ -264,4 +312,4 @@ bool FMetaHumanPerformanceExportAnimationSequenceTest::RunTest(const FString& In
+ 	return true;
+ }
+ 
+-#endif
+\ No newline at end of file
++#endif
+diff --git a/Engine/Plugins/MetaHuman/MetaHumanAnimator/Source/MetaHumanPerformance/Public/MetaHumanPerformance.h b/Engine/Plugins/MetaHuman/MetaHumanAnimator/Source/MetaHumanPerformance/Public/MetaHumanPerformance.h
+index 6e8a898..40063fc 100644
+--- a/Engine/Plugins/MetaHuman/MetaHumanAnimator/Source/MetaHumanPerformance/Public/MetaHumanPerformance.h
++++ b/Engine/Plugins/MetaHuman/MetaHumanAnimator/Source/MetaHumanPerformance/Public/MetaHumanPerformance.h
+@@ -784,4 +784,71 @@ private:
+ 
+ 	// Rotation and push back needed so things appear correctly in the viewport
+ 	const FTransform AudioDrivenAnimationViewportTransform = FTransform(FRotator(0, 90, 0), FVector(40.0, 0.0, 0.0));
++
++public:
++	// Appended settings preserve the layout of the pre-existing Performance data.
++	/** Fit additional pelvis articulation before final body optimization. Reprocess after changing these settings. */
++	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Processing Parameters", DisplayName = "Enable Pelvis Refinement",
++		meta = (EditCondition = "InputType == EDataInputType::MonoFootage && bBodyTracking && !bUsePelvisConsoleSettings"))
++	bool bEnablePelvisRefinement = true;
++
++	/** Forward/back pelvis correction blend. This does not scale the original animation. */
++	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Processing Parameters", DisplayName = "Pitch Strength",
++		meta = (ClampMin = "0", ClampMax = "1", UIMin = "0", UIMax = "1", EditCondition = "bBodyTracking && bEnablePelvisRefinement && !bUsePelvisConsoleSettings"))
++	float PelvisPitchStrength = 1.f;
++
++	/** Lateral pelvis correction blend. */
++	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Processing Parameters", DisplayName = "Roll Strength",
++		meta = (ClampMin = "0", ClampMax = "1", UIMin = "0", UIMax = "1", EditCondition = "bBodyTracking && bEnablePelvisRefinement && !bUsePelvisConsoleSettings"))
++	float PelvisRollStrength = 1.f;
++
++	/** Yaw/twist correction blend. Single-view depth remains ambiguous. */
++	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Processing Parameters", DisplayName = "Twist Strength",
++		meta = (ClampMin = "0", ClampMax = "1", UIMin = "0", UIMax = "1", EditCondition = "bBodyTracking && bEnablePelvisRefinement && !bUsePelvisConsoleSettings"))
++	float PelvisTwistStrength = .5f;
++
++	/** Offline temporal easing of the added rotation: 0 disables easing, 1 is strongest. Does not smooth the original body animation. */
++	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Processing Parameters", DisplayName = "Easing Strength",
++		meta = (ClampMin = "0", ClampMax = "1", UIMin = "0", UIMax = "1", EditCondition = "bBodyTracking && bEnablePelvisRefinement && !bUsePelvisConsoleSettings"))
++	float PelvisEasingStrength = .5f;
++
++	/** Add visible pelvis-surface image motion to the hip-landmark fit. Requires the optional system Python/OpenCV helper. */
++	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Processing Parameters", DisplayName = "Image-Aware Refinement",
++		meta = (EditCondition = "bBodyTracking && bEnablePelvisRefinement && !bUsePelvisConsoleSettings"))
++	bool bPelvisImageTracking = true;
++
++	/** Master blend for both pitch and roll, multiplied by their individual strengths. */
++	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Processing Parameters", DisplayName = "Tilt Strength",
++		meta = (ClampMin = "0", ClampMax = "1", UIMin = "0", UIMax = "1", EditCondition = "bBodyTracking && bEnablePelvisRefinement && !bUsePelvisConsoleSettings"))
++	float PelvisTiltStrength = 1.f;
++
++	/** Weight of confidence-filtered surface image evidence. */
++	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Processing Parameters", DisplayName = "Image Evidence Weight",
++		meta = (ClampMin = "0", ClampMax = "10", UIMin = "0", UIMax = "10", EditCondition = "bBodyTracking && bEnablePelvisRefinement && bPelvisImageTracking && !bUsePelvisConsoleSettings"))
++	float PelvisImageWeight = 4.f;
++
++	/** Artistic correction multiplier: 1 is normal. Higher values amplify noise as well as articulation; final caps still apply. */
++	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Processing Parameters", DisplayName = "Exaggeration",
++		meta = (ClampMin = "0", ClampMax = "3", UIMin = "0", UIMax = "3", EditCondition = "bBodyTracking && bEnablePelvisRefinement && !bUsePelvisConsoleSettings"))
++	float PelvisExaggeration = 1.f;
++
++	/** Maximum combined local pitch/roll correction, including after exaggeration and easing. */
++	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Processing Parameters", DisplayName = "Maximum Tilt",
++		meta = (ClampMin = "0", ClampMax = "45", UIMin = "0", UIMax = "45", Units = "Degrees", EditCondition = "bBodyTracking && bEnablePelvisRefinement && !bUsePelvisConsoleSettings"))
++	float PelvisMaxTilt = 20.f;
++
++	/** Maximum local twist correction during fitting and after exaggeration/easing. */
++	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Processing Parameters", DisplayName = "Maximum Twist",
++		meta = (ClampMin = "0", ClampMax = "45", UIMin = "0", UIMax = "45", Units = "Degrees", EditCondition = "bBodyTracking && bEnablePelvisRefinement && !bUsePelvisConsoleSettings"))
++	float PelvisMaxTwist = 15.f;
++
++	/** Write correction CSVs and retain image evidence for debugging. */
++	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Processing Parameters", DisplayName = "Write Refinement Diagnostics",
++		meta = (EditCondition = "bBodyTracking && bEnablePelvisRefinement && !bUsePelvisConsoleSettings"))
++	bool bPelvisDumpDiagnostics = false;
++
++	/** Use session console values instead of these saved settings. Intended for debugging and older console-driven workflows. */
++	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Processing Parameters", DisplayName = "Use Console Settings",
++		meta = (EditCondition = "InputType == EDataInputType::MonoFootage && bBodyTracking"))
++	bool bUsePelvisConsoleSettings = false;
+ };

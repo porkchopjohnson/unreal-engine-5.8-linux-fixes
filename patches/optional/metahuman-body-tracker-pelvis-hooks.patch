@@ -1,0 +1,265 @@
+diff --git a/Source/MetaHumanBodyTracker/Private/MetaHumanBodyTracker.cpp b/Source/MetaHumanBodyTracker/Private/MetaHumanBodyTracker.cpp
+index 77dfae1..585ed4f 100644
+--- a/Source/MetaHumanBodyTracker/Private/MetaHumanBodyTracker.cpp
++++ b/Source/MetaHumanBodyTracker/Private/MetaHumanBodyTracker.cpp
+@@ -11,6 +11,8 @@
+ #include "Nodes/RestoreFaceAnimationNode.h"
+ #include "MetaHumanBodyDriverActor.h"
+ #include "MetaHumanPerformance.h"
++#include "PelvisRefinement.h"
++#include "MetaHumanBodyTrackerLog.h"
+ 
+ 
+ 
+@@ -24,6 +26,7 @@ public:
+ 	TSharedPtr<UE::MetaHuman::Pipeline::FOffline2DKeypointEstimationNode> Offline2DKeypointEstimationNode;
+ 	TSharedPtr<UE::MetaHuman::Pipeline::FOfflinePoseEstimationNode> OfflinePoseEstimationNode;
+ 	TSharedPtr<UE::MetaHuman::Pipeline::FStoreFaceAnimationNode> StoreFaceAnimationNode;
++	TSharedPtr<const UE::MetaHuman::Pipeline::FPelvisRefinementOptions> PelvisOptions;
+ }; 
+ 
+ 
+@@ -87,6 +90,14 @@ bool FMetaHumanBodyTracker::ExtendPipeline(const FBodyTrackerInputParams& InBody
+ 
+ 			// Create stored state
+ 			BodyTrackerData = MakeShared<FBodyTrackerData>();
++			BodyTrackerData->PelvisOptions = MakeShared<UE::MetaHuman::Pipeline::FPelvisRefinementOptions>(
++				UE::MetaHuman::Pipeline::ResolvePelvisRefinementOptions(InBodyTrackerInputParams.Performance));
++			const auto& Options = *BodyTrackerData->PelvisOptions;
++			UE_LOG(LogMetaHumanBodyTracker, Display,
++				TEXT("Pelvis settings (%s): enabled=%d, pitch=%.3f, roll=%.3f, twist=%.3f, easing=%.3f, exaggeration=%.3f, image=%d"),
++				Options.bUsingConsoleSettings ? TEXT("console") : TEXT("Performance"), Options.bEnabled,
++				Options.Fit.PitchStrength, Options.Fit.RollStrength, Options.Fit.TwistStrength,
++				Options.Fit.EasingStrength, Options.Fit.Exaggeration, Options.bImageTracking);
+ 			BodyTrackerData->ImageSrcNode = InBodyTrackerInputParams.ImageSrcNode;
+ 			BodyTrackerData->OfflineCameraCalibrationNode = OfflineCameraCalibrationNode;
+ 			BodyTrackerData->StoreFaceAnimationNode = StoreFaceAnimationNode;
+@@ -98,6 +109,9 @@ bool FMetaHumanBodyTracker::ExtendPipeline(const FBodyTrackerInputParams& InBody
+ 
+ 			// Offline tracker collects data but produces no output
+ 			TSharedPtr<UE::MetaHuman::Pipeline::FOfflineBodyDetectionNode> OfflineBodyDetectionNode = InOutPipeline.MakeNode<UE::MetaHuman::Pipeline::FOfflineBodyDetectionNode>("OfflineBodyDetection");
++			const auto& PelvisOptions = *BodyTrackerData->PelvisOptions;
++			OfflineBodyDetectionNode->bCapturePelvisImages = PelvisOptions.bEnabled && PelvisOptions.bImageTracking &&
++				PelvisOptions.Fit.Exaggeration > 0 && PelvisOptions.Fit.SurfaceWeight > 0;
+ 			
+ 			if (InBodyTrackerInputParams.Performance)
+ 			{
+@@ -191,6 +205,7 @@ bool FMetaHumanBodyTracker::ExtendPipeline(const FBodyTrackerInputParams& InBody
+ 
+ 			OfflineBodyTrackerFinalizeNode->OfflineBodyTrackerNode = BodyTrackerData->OfflinePoseEstimationNode;
+ 			OfflineBodyTrackerFinalizeNode->bEnableFootLocking = InBodyTrackerInputParams.bEnableFootLocking;
++			OfflineBodyTrackerFinalizeNode->PelvisRefinementOptions = BodyTrackerData->PelvisOptions;
+ 
+ 			// Is there existing body animation somewhere in the sequence? If so then the Performances's AdditionalBodyTrackerData will have
+ 			// serialized info used in that solve - like camera params, shape - that we want to use for this solve in order
+diff --git a/Source/MetaHumanBodyTracker/Private/Nodes/OfflineBodyTrackerNode.cpp b/Source/MetaHumanBodyTracker/Private/Nodes/OfflineBodyTrackerNode.cpp
+index 2c81d75..a8bd5a2 100644
+--- a/Source/MetaHumanBodyTracker/Private/Nodes/OfflineBodyTrackerNode.cpp
++++ b/Source/MetaHumanBodyTracker/Private/Nodes/OfflineBodyTrackerNode.cpp
+@@ -11,6 +11,11 @@
+ #include "Logging/StructuredLog.h"
+ #include "MetaHumanBodyTrackerLog.h"
+ #include "MetaHumanSMPLX.h"
++#include "PelvisRefinement.h"
++#include "PelvisImageTracking.h"
++#include "HAL/IConsoleManager.h"
++#include "Misc/FileHelper.h"
++#include "Misc/Paths.h"
+ #include "OfflineBodyTracker.h"
+ #include "SAM2.h"
+ 
+@@ -27,6 +32,68 @@ MH_ENABLE_WARNINGS
+ namespace UE::MetaHuman::Pipeline
+ {
+ 
++static TAutoConsoleVariable<int32> CVarPelvisRefinement(TEXT("mh.BodyTracker.PelvisRefinement"), 1,
++	TEXT("Enable experimental confidence-weighted pelvis orientation fitting before final optimization (0/1)."));
++static TAutoConsoleVariable<float> CVarPelvisTilt(TEXT("mh.BodyTracker.PelvisRefinement.TiltStrength"), 1.f,
++	TEXT("Pelvis tilt correction blend, 0 to 1."));
++static TAutoConsoleVariable<float> CVarPelvisTwist(TEXT("mh.BodyTracker.PelvisRefinement.TwistStrength"), 0.5f,
++	TEXT("Pelvis twist correction blend, 0 to 1. Monocular depth remains ambiguous."));
++static TAutoConsoleVariable<float> CVarPelvisPitch(TEXT("mh.BodyTracker.PelvisRefinement.PitchStrength"), 1.f,
++	TEXT("Local X pitch blend, 0 to 1, multiplied by TiltStrength."));
++static TAutoConsoleVariable<float> CVarPelvisRoll(TEXT("mh.BodyTracker.PelvisRefinement.RollStrength"), 1.f,
++	TEXT("Local Z roll blend, 0 to 1, multiplied by TiltStrength."));
++static TAutoConsoleVariable<float> CVarPelvisExaggeration(TEXT("mh.BodyTracker.PelvisRefinement.Exaggeration"), 1.f,
++	TEXT("Artistic gain on the fitted correction, 0 to 3. 1 is tracked motion; >1 exaggerates. Final angle caps still apply."));
++static TAutoConsoleVariable<float> CVarPelvisEasing(TEXT("mh.BodyTracker.PelvisRefinement.EasingStrength"), 0.5f,
++	TEXT("Offline temporal easing of the added pelvis rotation, 0 to 1. 0 bypasses easing; 1 uses an 80 ms Gaussian width. No causal playback lag or smoothing across invalid frames."));
++static TAutoConsoleVariable<int32> CVarPelvisImageTracking(TEXT("mh.BodyTracker.PelvisRefinement.ImageTracking"), 1,
++	TEXT("Track foreground pelvis-surface image motion for three-axis fitting (requires system Python/OpenCV). 0 uses hip landmarks only."));
++static TAutoConsoleVariable<float> CVarPelvisImageWeight(TEXT("mh.BodyTracker.PelvisRefinement.ImageWeight"), 4.f,
++	TEXT("Confidence-weighted surface tracking contribution, 0 to 10."));
++static TAutoConsoleVariable<float> CVarPelvisMaxTilt(TEXT("mh.BodyTracker.PelvisRefinement.MaxTilt"), 20.f,
++	TEXT("Maximum pelvis tilt correction in degrees."));
++static TAutoConsoleVariable<float> CVarPelvisMaxTwist(TEXT("mh.BodyTracker.PelvisRefinement.MaxTwist"), 15.f,
++	TEXT("Maximum pelvis twist correction in degrees, before strength blending."));
++static TAutoConsoleVariable<int32> CVarPelvisDump(TEXT("mh.BodyTracker.PelvisRefinement.Dump"), 0,
++	TEXT("Write per-frame pelvis correction diagnostics to Saved/PelvisRefinement (0/1)."));
++
++FPelvisRefinementOptions ResolvePelvisRefinementOptions(const UMetaHumanPerformance* Performance)
++{
++	FPelvisRefinementOptions Options;
++	if (Performance && !Performance->bUsePelvisConsoleSettings)
++	{
++		Options.bEnabled = Performance->bEnablePelvisRefinement;
++		Options.bImageTracking = Performance->bPelvisImageTracking;
++		Options.bDumpDiagnostics = Performance->bPelvisDumpDiagnostics;
++		Options.Fit.TiltStrength = Performance->PelvisTiltStrength;
++		Options.Fit.TwistStrength = Performance->PelvisTwistStrength;
++		Options.Fit.PitchStrength = Performance->PelvisPitchStrength;
++		Options.Fit.RollStrength = Performance->PelvisRollStrength;
++		Options.Fit.Exaggeration = Performance->PelvisExaggeration;
++		Options.Fit.EasingStrength = Performance->PelvisEasingStrength;
++		Options.Fit.SurfaceWeight = Performance->PelvisImageWeight;
++		Options.Fit.MaxTiltDegrees = Performance->PelvisMaxTilt;
++		Options.Fit.MaxTwistDegrees = Performance->PelvisMaxTwist;
++	}
++	else
++	{
++		Options.bUsingConsoleSettings = true;
++		Options.bEnabled = CVarPelvisRefinement.GetValueOnAnyThread() != 0;
++		Options.bImageTracking = CVarPelvisImageTracking.GetValueOnAnyThread() != 0;
++		Options.bDumpDiagnostics = CVarPelvisDump.GetValueOnAnyThread() != 0;
++		Options.Fit.TiltStrength = CVarPelvisTilt.GetValueOnAnyThread();
++		Options.Fit.TwistStrength = CVarPelvisTwist.GetValueOnAnyThread();
++		Options.Fit.PitchStrength = CVarPelvisPitch.GetValueOnAnyThread();
++		Options.Fit.RollStrength = CVarPelvisRoll.GetValueOnAnyThread();
++		Options.Fit.Exaggeration = CVarPelvisExaggeration.GetValueOnAnyThread();
++		Options.Fit.EasingStrength = CVarPelvisEasing.GetValueOnAnyThread();
++		Options.Fit.SurfaceWeight = CVarPelvisImageWeight.GetValueOnAnyThread();
++		Options.Fit.MaxTiltDegrees = CVarPelvisMaxTilt.GetValueOnAnyThread();
++		Options.Fit.MaxTwistDegrees = CVarPelvisMaxTwist.GetValueOnAnyThread();
++	}
++	return Options;
++}
++
+ class FOfflineBodyDetectionNodeInternal
+ {
+ public:
+@@ -86,6 +153,9 @@ bool FOfflineBodyDetectionNode::Start(const TSharedPtr<FPipelineData>& InPipelin
+ {
+ 	ValidFrames.Reset();
+ 	BoundingBoxes.Reset();
++	PelvisGrayFrames.Reset();
++	PelvisMasks.Reset();
++	PelvisImageWidth = PelvisImageHeight = 0;
+ 	Impl->Detector.Reset();
+ 	Impl->Tracker.Reset();
+ 	return true;
+@@ -172,6 +242,34 @@ bool FOfflineBodyDetectionNode::Process(const TSharedPtr<FPipelineData>& InPipel
+ 		ValidFrames.Add(false);
+ 		BoundingBoxes.Add(FIntRect());
+ 	}
++	if (bCapturePelvisImages)
++	{
++		TArray<uint8>& Gray = PelvisGrayFrames.AddDefaulted_GetRef();
++		TArray<uint8>& Mask = PelvisMasks.AddDefaulted_GetRef();
++		if (ValidFrames.Last() && !Tracking.IsEmpty() && Tracking[0].Mask.Format == ERawImageFormat::G8)
++		{
++			const FIntPoint Size = UE::BodyTracker::Utils::CalculateAdjustedSize(Input.Width, Input.Height, 448);
++			if (PelvisImageWidth == 0) { PelvisImageWidth = Size.X; PelvisImageHeight = Size.Y; }
++			const FImage& SourceMask = Tracking[0].Mask;
++			if (Size.X == PelvisImageWidth && Size.Y == PelvisImageHeight && Input.Data.Num() >= int64(Input.Width) * Input.Height * 4 &&
++				SourceMask.RawData.Num() >= int64(SourceMask.SizeX) * SourceMask.SizeY && SourceMask.SizeX > 0 && SourceMask.SizeY > 0)
++			{
++				Gray.SetNumUninitialized(Size.X * Size.Y);
++				Mask.SetNumUninitialized(Size.X * Size.Y);
++				for (int32 Y = 0; Y < Size.Y; ++Y)
++				{
++					const int32 SrcY = Y * Input.Height / Size.Y, MaskY = Y * SourceMask.SizeY / Size.Y;
++					for (int32 X = 0; X < Size.X; ++X)
++					{
++						const int32 SrcX = X * Input.Width / Size.X, MaskX = X * SourceMask.SizeX / Size.X;
++						const uint8* Pixel = Input.Data.GetData() + (int64(SrcY) * Input.Width + SrcX) * 4;
++						Gray[Y * Size.X + X] = (29 * Pixel[0] + 150 * Pixel[1] + 77 * Pixel[2]) >> 8;
++						Mask[Y * Size.X + X] = SourceMask.RawData[int64(MaskY) * SourceMask.SizeX + MaskX] ? 255 : 0;
++					}
++				}
++			}
++		}
++	}
+ 	return true;
+ }
+ 
+@@ -547,6 +645,45 @@ bool FOfflineBodyTrackerFinalizeNode::Start(const TSharedPtr<FPipelineData>& InP
+ 		OfflineBodyTrackerNode->Shape[Index] = AverageShape[Index % 10];
+ 	}
+ 
++	const FPelvisRefinementOptions Options = PelvisRefinementOptions ? *PelvisRefinementOptions : ResolvePelvisRefinementOptions(Performance);
++	if (Options.bEnabled)
++	{
++		Impl->SMPLX->SetShape(AverageShape);
++		Impl->SMPLX->SetPose(TArray<float>());
++		const FPelvisRefinementSettings& Settings = Options.Fit;
++		const auto& Calibration = OfflineBodyTrackerNode->OfflineCameraCalibrationNode;
++		const bool bDump = Options.bDumpDiagnostics;
++		TArray<FPelvisSurfaceObservation> Surface;
++		if (Options.bImageTracking && Settings.Exaggeration > 0 && Settings.SurfaceWeight > 0 &&
++			OfflineBodyTrackerNode->OfflineBodyDetectionNode)
++		{
++			const auto& Detection = OfflineBodyTrackerNode->OfflineBodyDetectionNode;
++			Surface = TrackPelvisSurface(*Impl->SMPLX, AverageShape, OfflineBodyTrackerNode->Pose,
++				OfflineBodyTrackerNode->Translation, OfflineBodyTrackerNode->KeypointsTitan25x3, OfflineBodyTrackerNode->ValidFrame,
++				Detection->PelvisGrayFrames, Detection->PelvisMasks, Detection->PelvisImageWidth, Detection->PelvisImageHeight,
++				FVector2f(Calibration->BodyTrackingRasterWidth, Calibration->BodyTrackingRasterHeight),
++				Calibration->FocalLength, Calibration->CameraImgCenter, OfflineBodyTrackerNode->SourceFps, bDump);
++			Impl->SMPLX->SetPose(TArray<float>());
++		}
++		const FPelvisRefinementStats Stats = RefinePelvisOrientation(Impl->SMPLX->GetBoneHierarchyUE(),
++			OfflineBodyTrackerNode->KeypointsTitan25x3, OfflineBodyTrackerNode->ValidFrame,
++			OfflineBodyTrackerNode->Translation, Calibration->FocalLength, Calibration->CameraImgCenter,
++			OfflineBodyTrackerNode->SourceFps, Settings, OfflineBodyTrackerNode->Pose, bDump, Surface);
++		UE_LOGFMT(LogMetaHumanBodyTracker, Display,
++			"Pelvis refinement: eligible={Eligible}, refined={Refined}, image fitting loss={Before}->{After}, max correction={Degrees} deg, landmark scale={Scale}",
++			Stats.EligibleFrames, Stats.RefinedFrames, Stats.BeforeSquaredError, Stats.AfterSquaredError, Stats.MaxCorrectionDegrees, Stats.LandmarkScale);
++		UE_LOGFMT(LogMetaHumanBodyTracker, Display, "Pelvis surface evidence: frames={Frames}, observations={Observations}, fitted loss={Loss}, exaggeration={Gain}",
++			Stats.SurfaceFrames, Stats.SurfaceObservations, Stats.FittedSquaredError, Settings.Exaggeration);
++		if (bDump && !Stats.DiagnosticCSV.IsEmpty())
++		{
++			const FString Directory = FPaths::ProjectSavedDir() / TEXT("PelvisRefinement");
++			IFileManager::Get().MakeDirectory(*Directory, true);
++			const FString Filename = Directory / (TEXT("Pelvis-") + FGuid::NewGuid().ToString() + TEXT(".csv"));
++			FFileHelper::SaveStringToFile(Stats.DiagnosticCSV, *Filename);
++			UE_LOGFMT(LogMetaHumanBodyTracker, Display, "Pelvis refinement diagnostics: {Filename}", Filename);
++		}
++	}
++
+ 	const float CameraPitch = OfflineBodyTrackerNode->OfflineCameraCalibrationNode->Pitch;
+ 	const float CameraRoll = OfflineBodyTrackerNode->OfflineCameraCalibrationNode->Roll;
+ 	float HpsGlobalMaxY = 0.0f;
+diff --git a/Source/MetaHumanBodyTracker/Public/Nodes/OfflineBodyTrackerNode.h b/Source/MetaHumanBodyTracker/Public/Nodes/OfflineBodyTrackerNode.h
+index ec27378..7e8825b 100644
+--- a/Source/MetaHumanBodyTracker/Public/Nodes/OfflineBodyTrackerNode.h
++++ b/Source/MetaHumanBodyTracker/Public/Nodes/OfflineBodyTrackerNode.h
+@@ -17,6 +17,8 @@ class UMetaHumanPerformance;
+ namespace UE::MetaHuman::Pipeline
+ {
+ 
++struct FPelvisRefinementOptions;
++
+ class FOfflineBodyDetectionNode : public FNode
+ {
+ public:
+@@ -29,9 +31,13 @@ public:
+ 
+ 	float DetectionScoreThreshold = 0.7f;
+ 	float TrackingScoreThreshold = 0.5f;
++	bool bCapturePelvisImages = true;
+ 
+ 	TArray64<bool> ValidFrames;
+ 	TArray64<FIntRect> BoundingBoxes;
++	// Optional low-resolution foreground evidence for the image-aware pelvis pass.
++	TArray<TArray<uint8>> PelvisGrayFrames, PelvisMasks;
++	int32 PelvisImageWidth = 0, PelvisImageHeight = 0;
+ 
+ 	enum ErrorCode
+ 	{
+@@ -143,6 +149,7 @@ public:
+ 
+ 	TArray<float> AverageShape;
+ 	bool bEnableFootLocking = true;
++	TSharedPtr<const FPelvisRefinementOptions> PelvisRefinementOptions;
+ 
+ private:
+ 

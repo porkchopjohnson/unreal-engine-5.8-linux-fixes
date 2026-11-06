@@ -216,6 +216,12 @@ succeeded, and both model comparison and the five-stage solve passed.
 
 ## Distributed contents
 
+For additional image-aware pelvis articulation, temporal easing, and saved
+Body Tracking controls, see the separate
+[pelvis refinement integration](METAHUMAN-PELVIS-REFINEMENT.md). Its source overlay
+and patches can be installed alongside CUDA; it does not change this integration's
+runtime selection or require CUDA to fit pelvis corrections.
+
 `integrations/MetaHumanBodyTrackerCUDA/` is an overlay of newly authored source,
 not a complete MetaHumanBodyTracker plugin. The two optional patches contain only
 the engine accessor fix and existing runtime-selection hook changes. Install

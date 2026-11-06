@@ -1,8 +1,8 @@
 # Unreal Engine 5.8 Linux Fixes & Optional Tools
 
 Make **Unreal Engine 5.8.3 on Linux** easier to use: smoother editor interaction,
-desktop file dialogs, video importing for MetaHuman Animator, and NVIDIA CUDA
-acceleration for offline body tracking.
+desktop file dialogs, video importing for MetaHuman Animator, NVIDIA CUDA
+acceleration for offline body tracking, and eased pelvis refinement with saved controls.
 
 Tested with a local UE 5.8.3 source build on Fedora/KDE Plasma Wayland, with Unreal
 running through XWayland. **This repository contains source code, patches, and
@@ -14,6 +14,7 @@ instructions. You build the components you choose for your own engine.**
 | --- | --- | --- |
 | Import a video into MetaHuman Animator without Live Link Hub | **Optional MetaHuman Video Importer plugin** | [Install and import your first video](plugins/MetaHumanVideoImporter/README.md) |
 | Speed up offline MetaHuman body tracking on an NVIDIA GPU | **Optional CUDA integration** | [CUDA installation and usage](METAHUMAN-BODY-TRACKER-CUDA.md) |
+| Improve tracked pelvis articulation and smooth its added correction | **Optional pelvis refinement integration** | [Install and use saved pelvis controls](METAHUMAN-PELVIS-REFINEMENT.md) |
 | Copy a physics setup between character meshes | **Optional Physics Asset Transfer Tools plugin** | [Plugin installation and usage](plugins/PhysicsAssetTransferTools/README.md) |
 | Fix slow scrolling in asset/object dropdowns | SDL X11 popup fix | [Asset-picker scrolling guide](ASSET-PICKER-SCROLLING.md) |
 | Reduce Physics Asset Editor (PhAT) lag | Vulkan deletion-validation fix | [PhAT performance guide](VULKAN-PHAT-PERFORMANCE.md) |
@@ -85,6 +86,20 @@ Automation tests and a five-stage real-footage solve passed. The user also
 processed the **full clip** and confirmed it **"works very well."**
 
 **[Follow the CUDA setup guide →](METAHUMAN-BODY-TRACKER-CUDA.md)**
+
+### Refine pelvis motion with saved controls and easing
+
+The [pelvis refinement integration](METAHUMAN-PELVIS-REFINEMENT.md) adds
+image-aware pitch, roll, and twist corrections to offline body tracking, with
+temporal easing and per-Performance controls under **Body Tracking → Pelvis
+Refinement**. It works alongside the optional CUDA integration.
+
+Nine native tests and four image-helper tests passed. Saved settings survived a
+fresh-editor reload, and full processing with foot locking succeeded. The user
+confirmed the refinement, easing, and UI together resolved their current issues.
+Keep exaggeration at 1 and adjust easing for smoother corrections.
+
+**[Follow the pelvis refinement setup guide →](METAHUMAN-PELVIS-REFINEMENT.md)**
 
 ## Engine fixes
 
@@ -160,6 +175,7 @@ are separate, feature-specific changes; follow their associated guides.
 | [Engine fix reference](EDITOR-FIXES.md) | Patch details, focus diagnostics, validation history and archive verification |
 | [MetaHuman Video Importer](plugins/MetaHumanVideoImporter/README.md) | Installation, importing, saved files, range repair and common problems |
 | [MetaHuman CUDA](METAHUMAN-BODY-TRACKER-CUDA.md) | Dependencies, rebuilding, GPU confirmation, CPU/CUDA controls and benchmarks |
+| [MetaHuman pelvis refinement](METAHUMAN-PELVIS-REFINEMENT.md) | Source installation, saved Body Tracking controls, easing, diagnostics and validation |
 | [Physics Asset Transfer Tools](plugins/PhysicsAssetTransferTools/README.md) | Copying a physics setup, requirements and verification |
 | [KDE file dialogs](PORTAL-FILE-DIALOGS.md) | Portal setup, fallback behavior and dialog troubleshooting |
 | [Asset-picker scrolling](ASSET-PICKER-SCROLLING.md) | SDL diagnosis, regression probe and installation |

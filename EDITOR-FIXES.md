@@ -31,6 +31,13 @@ converts video files into project-local footage and configured monocular
 Performance assets without Live Link Hub. Version 1.1 includes the usable-range
 crash fix and automatic repair for affected older imports; both automation tests passed.
 
+The optional [pelvis refinement integration](METAHUMAN-PELVIS-REFINEMENT.md)
+adds image-aware pelvis articulation, temporal easing, and saved Body Tracking
+controls to MetaHuman Performances. It includes a source overlay and separate
+engine/UI and plugin hook patches, compatible with the optional CUDA integration.
+Nine native tests, four image-helper tests, saved-settings reload, and transient
+foot-locking solves passed; the user approved the installed result.
+
 ## What was already in the 5.8.3 source
 
 The source archive used as the baseline already contained:
